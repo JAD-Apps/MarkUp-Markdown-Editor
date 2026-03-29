@@ -2,7 +2,7 @@
 
 All notable changes to MarkUp Markdown Editor will be documented in this file.
 
-## [1.6.0] - 2025-07-25
+## [1.6.0] - 2026-03-24
 
 ### Added
 - **Full bidirectional editing with toolbar formatting from the preview pane**: All toolbar
@@ -59,7 +59,7 @@ All notable changes to MarkUp Markdown Editor will be documented in this file.
 - **Updated `MarkdownFormatterTests`**: corrected `ToggleItalic_OnBoldItalicSelection`
   expectation and added `TryRemoveTripleAsteriskCombination` / `TryRemoveNestedMarker` cases.
 
-## [1.5.1] - 2025-07-14
+## [1.5.1] - 2026-03-19
 
 ### Fixed
 - **Real-time preview-to-editor content sync**: Reduced the JavaScript `notifyChange`
@@ -93,7 +93,7 @@ All notable changes to MarkUp Markdown Editor will be documented in this file.
   selection inside formatted text, full inner text expansion, boundary conditions
   (start/end of document), zero-length selection, strikethrough, and inline code.
 
-## [1.5.0] - 2025-06-19
+## [1.5.0] - 2026-03-18
 
 ### Added
 - **File type association for `.md` / `.markdown`**: The app registers itself as a handler
@@ -146,7 +146,7 @@ All notable changes to MarkUp Markdown Editor will be documented in this file.
 - `MarkdownFormatter.ToggleWrap` now uses `IsExactMarkerAt()` for all marker boundary
   checks.
 
-## [1.4.5] - 2025-06-18
+## [1.4.5] - 2026-03-17
 
 ### Added
 - **`AutomationEditorInput` injection bridge**: A hidden single-line `TextBox`
@@ -189,7 +189,7 @@ All notable changes to MarkUp Markdown Editor will be documented in this file.
   after a previous test run closed the app), ensuring the full deployment and launch
   pipeline runs for every test regardless of how many tests are selected.
 
-## [1.4.0] - 2025-06-17
+## [1.4.0] - 2026-03-14
 
 ### Added
 - **Find & Replace bar**: Inline toolbar that slides in below the menu bar with a Find text
@@ -283,7 +283,7 @@ All notable changes to MarkUp Markdown Editor will be documented in this file.
   entities (`&#160;`) and numeric hex entities (`&#xA0;`) in addition to the named
   entities that were already supported.
 
-## [1.3.2] - 2025-06-16
+## [1.3.2] - 2026-02-17
 
 ### Fixed
 - **Line count not updating when opening a file**: `CountLines` only counted `\n` characters
@@ -294,7 +294,7 @@ All notable changes to MarkUp Markdown Editor will be documented in this file.
 - **4 new unit tests** covering `\r`-only and `\r\n` line and paragraph counting (151 total).
 
 
-## [1.3.1] - 2025-06-15
+## [1.3.1] - 2026-02-14
 
 ### Fixed
 - **Print footer no longer shows about:blank**: Preview and print content is now served via
@@ -308,7 +308,7 @@ All notable changes to MarkUp Markdown Editor will be documented in this file.
 - **Print and PDF margins now match**: Both print and PDF export use the same default browser
   margins for consistent output.
 
-## [1.3.0] - 2025-06-15
+## [1.3.0] - 2026-02-13
 
 ### Added
 - **Document title in preview HTML**: `ToHtml()` now accepts a `documentTitle` parameter; the
@@ -333,7 +333,7 @@ All notable changes to MarkUp Markdown Editor will be documented in this file.
 - Splitter minimum width changed from fixed 100px to 20% of available width.
 - Print operation no longer sets `document.title` via JavaScript (title is in HTML).
 
-## [1.2.0] - 2025-06-14
+## [1.2.0] - 2026-02-13
 
 ### Added
 - **Ctrl+Click to follow links**: Links in the preview pane can now be opened in the default
@@ -357,7 +357,7 @@ All notable changes to MarkUp Markdown Editor will be documented in this file.
 - `MenuPrint_Click` and `MenuExportPdf_Click` no longer call `UpdatePreview()` after printing
   since the preview is never disrupted.
 
-## [1.1.0] - 2025-06-14
+## [1.1.0] - 2026-02-13
 
 ### Added
 - **WYSIWYG Preview Editor**: The preview pane is now a full rich-text editor. Users can edit
@@ -393,7 +393,7 @@ All notable changes to MarkUp Markdown Editor will be documented in this file.
   contentEditable HTML with an embedded WYSIWYG toolbar.
 - `MarkdownParser.ToHtmlForPrint()` now accepts an optional `documentTitle` parameter.
 
-## [1.0.0] - 2025-06-13
+## [1.0.0] - 2026-02-13
 
 ### Added
 - Initial release of MarkUp Markdown Editor.
