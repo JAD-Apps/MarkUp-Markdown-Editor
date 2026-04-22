@@ -892,7 +892,7 @@ public sealed partial class MainWindow : Window
             ApplyEditorDocumentUpdate(content, 0, 0);
             _document.MarkSaved();
             _previewInitialized = false;
-            UpdatePreview();
+            _ = UpdatePreviewAsync(forceWhenPreviewFocused: true);
         }
         catch (Exception ex)
         {

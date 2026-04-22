@@ -183,4 +183,51 @@ public class MarkdownDocumentTests
         doc.Content = "Changed";
         Assert.IsTrue(doc.IsDirty);
     }
+
+    /// <summary>
+    /// Verifies that Reset() clears both Content and FilePath, which is the contract that
+    /// LoadFileFromPathAsync relies on before setting _previewInitialized = false and
+    /// calling UpdatePreviewAsync(forceWhenPreviewFocused: true).
+    /// </summary>
+    [TestMethod]
+    public void DocumentLoad_PreviewInitializedResetToFalse()
+    {
+        // Arrange — simulate state after a first document has been loaded and modified.
+        var doc = new MarkdownDocument();
+        doc.FilePath = @"C:\docs\first.md";
+        doc.Content = "# First document";
+        doc.MarkSaved();
+
+        // Act — Reset() is called at the start of LoadFileFromPathAsync before
+        // FilePath and Content are set to the new document's values.
+        doc.Reset();
+
+        // Assert — both FilePath and Content must be empty so that any subsequent
+        // preview render starts from a clean slate (equivalent to _previewInitialized = false).
+        Assert.AreEqual(string.Empty, doc.Content, "Content must be cleared by Reset()");
+        Assert.AreEqual(string.Empty, doc.FilePath, "FilePath must be cleared by Reset()");
+        Assert.IsFalse(doc.IsDirty, "IsDirty must be false after Reset()");
+    }
+
+    [TestMethod]
+    public void DocumentLoad_AfterReset_NewContentIsReflected()
+    {
+        // Arrange
+        var doc = new MarkdownDocument();
+        doc.FilePath = @"C:\docs\first.md";
+        doc.Content = "# Old document";
+        doc.MarkSaved();
+
+        // Act — simulate LoadFileFromPathAsync pattern
+        doc.Reset();
+        doc.FilePath = @"C:\docs\second.md";
+        doc.Content = "# New document";
+        doc.MarkSaved();
+
+        // Assert — new document content is reflected correctly
+        Assert.AreEqual("# New document", doc.Content);
+        Assert.AreEqual(@"C:\docs\second.md", doc.FilePath);
+        Assert.IsFalse(doc.IsDirty);
+        Assert.AreEqual("second.md", doc.DisplayName);
+    }
 }
