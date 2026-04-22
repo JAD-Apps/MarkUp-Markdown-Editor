@@ -1030,4 +1030,92 @@ public class HtmlToMarkdownConverterTests
     }
 
     #endregion
+
+    #region Browser/web-origin Word HTML list items (mso-list: in inline style)
+
+    /// <summary>
+    /// Reproduces the exact pattern from a GitHub README page copied via Word's web engine.
+    /// List items are encoded as &lt;p class=MsoNormal style='...mso-list:l0 level1 lfo1...'&gt;
+    /// with the bullet inside a non-comment IE conditional &lt;![if !supportLists]&gt;...&lt;![endif]&gt;.
+    /// </summary>
+    [TestMethod]
+    public void Convert_BrowserOriginWordHtml_MsoListInStyle_ProducesListItem()
+    {
+        // Exact pattern from real clipboard capture: p class=MsoNormal with mso-list: in style
+        const string html =
+            "<p class=MsoNormal style='margin-left:60.0pt;text-indent:-18.0pt;" +
+            "mso-list:l0 level1 lfo1'>" +
+            "<![if !supportLists]><span style='font-family:Symbol'>" +
+            "<span style='mso-list:Ignore'>\u00B7<span>&nbsp;&nbsp;</span></span>" +
+            "</span><![endif]>" +
+            "<strong><span>New</span></strong>" +
+            "<span> \u2014 Start a fresh document</span></p>";
+
+        var result = HtmlToMarkdownConverter.Convert(html);
+
+        Assert.IsTrue(result.StartsWith("- "), $"Expected list item, got: {result}");
+        Assert.IsFalse(result.Contains("\u00B7"), $"Middle dot must be stripped: {result}");
+        Assert.IsTrue(result.Contains("New"), $"Bold text must be preserved: {result}");
+        Assert.IsTrue(result.Contains("Start a fresh document"), $"Content must be preserved: {result}");
+    }
+
+    [TestMethod]
+    public void Convert_BrowserOriginWordHtml_NonCommentConditional_BulletGlyphStripped()
+    {
+        // The <![if !supportLists]>...<![endif]> block (non-comment form) must be fully
+        // removed so neither the bullet glyph nor surrounding whitespace appear in output.
+        const string html =
+            "<p class=MsoNormal style='mso-list:l0 level1 lfo1'>" +
+            "<![if !supportLists]><span style='font-family:Symbol'>" +
+            "<span style='mso-list:Ignore'>\u00B7   </span></span><![endif]>" +
+            "Save / Save As</p>";
+
+        var result = HtmlToMarkdownConverter.Convert(html);
+        Assert.IsTrue(result.StartsWith("- "), $"Expected list item: {result}");
+        Assert.IsFalse(result.Contains("\u00B7"), $"Bullet glyph must not appear: {result}");
+        Assert.IsTrue(result.Contains("Save"), $"Content must be preserved: {result}");
+    }
+
+    [TestMethod]
+    public void Convert_BrowserOriginWordHtml_Level2_ProducesIndentedItem()
+    {
+        // level2 in mso-list should produce one indent level (2 spaces + "- ")
+        const string html =
+            "<p class=MsoNormal style='mso-list:l0 level2 lfo1'>Nested item</p>";
+
+        var result = HtmlToMarkdownConverter.Convert(html);
+        Assert.IsTrue(result.StartsWith("  - "), $"Expected indented list item, got: '{result}'");
+    }
+
+    [TestMethod]
+    public void Convert_BrowserOriginWordHtml_MultipleItems_AllConvertedToList()
+    {
+        // Reproduces the File Operations section from the user-reported Inklet paste.
+        // Each item is a <p class=MsoNormal style='mso-list:...'> with a non-comment
+        // IE conditional wrapping the bullet glyph.
+        const string html =
+            "<h3>File Operations</h3>" +
+            "<p class=MsoNormal style='mso-list:l0 level1 lfo1'>" +
+            "<![if !supportLists]><span style='font-family:Symbol'><span style='mso-list:Ignore'>\u00B7 </span></span><![endif]>" +
+            "<strong><span>New</span></strong><span> \u2014 Start a fresh document in the current tab</span></p>" +
+            "<p class=MsoNormal style='mso-list:l0 level1 lfo1'>" +
+            "<![if !supportLists]><span style='font-family:Symbol'><span style='mso-list:Ignore'>\u00B7 </span></span><![endif]>" +
+            "<strong><span>New Tab</span></strong><span> \u2014 Open an additional editor tab (Ctrl+T)</span></p>" +
+            "<p class=MsoNormal style='mso-list:l0 level1 lfo1'>" +
+            "<![if !supportLists]><span style='font-family:Symbol'><span style='mso-list:Ignore'>\u00B7 </span></span><![endif]>" +
+            "<strong><span>Close Tab</span></strong><span> \u2014 Close the current tab (Ctrl+W)</span></p>";
+
+        var result = HtmlToMarkdownConverter.Convert(html);
+
+        Assert.IsTrue(result.Contains("### File Operations"), $"Section heading missing: {result}");
+        Assert.IsTrue(result.Contains("- "), $"Must have list items: {result}");
+        Assert.IsFalse(result.Contains("\u00B7"), $"No bullet glyphs: {result}");
+
+        var listLines = result.Split('\n').Where(l => l.TrimStart().StartsWith("- ")).ToList();
+        Assert.AreEqual(3, listLines.Count, $"Expected 3 list items, got {listLines.Count}:\n{result}");
+        Assert.IsTrue(listLines.Any(l => l.Contains("New Tab")), $"'New Tab' item missing: {result}");
+        Assert.IsTrue(listLines.Any(l => l.Contains("Close Tab")), $"'Close Tab' item missing: {result}");
+    }
+
+    #endregion
 }

@@ -112,27 +112,35 @@ public static partial class HtmlToMarkdownConverter
     /// </summary>
     private static string StripOfficeNamespaceTags(string html)
     {
-        // Strip Word conditional comments: <!--[if ...]>...</![endif]-->
+        // Strip Word conditional comments (comment form): <!--[if ...]>...</[endif]-->
         html = WordConditionalCommentRegex().Replace(html, string.Empty);
+
+        // Strip Word non-comment IE conditionals (non-comment form): <![if ...]>...</![endif]>
+        // These appear around bullet indicator spans in browser-copied Word/GitHub HTML.
+        html = WordNonCommentConditionalRegex().Replace(html, string.Empty);
 
         // Strip Office XML namespace elements and their content: <o:p>, <w:*>, <m:*>, <v:*>
         // These are always paired or self-closing in Word HTML.
         html = OfficeNamespaceElementRegex().Replace(html, string.Empty);
 
-        // Strip mso-* style attributes that litter every Word span/paragraph
-        // e.g. style="mso-list:l0 level1 lfo1;margin-left:36.0pt;..."
-        // Keep the style attribute if it has non-mso content (font-weight, font-style etc.)
+        // Strip mso-* style attributes (double-quoted style="...").
         html = MsoStyleAttributeRegex().Replace(html, m =>
         {
-            // Remove each mso-* property from the style value; keep non-mso properties
             var styleValue = m.Groups[1].Value;
             var cleaned = MsoPropertyRegex().Replace(styleValue, string.Empty).Trim().TrimEnd(';').Trim();
             return cleaned.Length > 0 ? $"style=\"{cleaned}\"" : string.Empty;
         });
 
-        // Strip Word-specific class attributes (MsoNormal, MsoListParagraph etc.)
-        // We preserve the class value itself — ConvertWordListParagraphs reads it.
-        // Only strip the lang attribute which is noise.
+        // Strip mso-* style attributes (single-quoted style='...').
+        html = MsoStyleAttributeSingleQuoteRegex().Replace(html, m =>
+        {
+            var styleValue = m.Groups[1].Value;
+            var cleaned = MsoPropertyRegex().Replace(styleValue, string.Empty).Trim().TrimEnd(';').Trim();
+            return cleaned.Length > 0 ? $"style='{cleaned}'" : string.Empty;
+        });
+
+        // Strip Word-specific class attributes (MsoNormal, MsoListParagraph etc.).
+        // Only strip the lang attribute which is pure noise.
         html = WordLangAttributeRegex().Replace(html, string.Empty);
 
         return html;
@@ -153,8 +161,16 @@ public static partial class HtmlToMarkdownConverter
     /// </summary>
     private static string ConvertWordListParagraphs(string html)
     {
+        // Strip non-comment IE conditionals first so bullet indicator spans are visible
+        // to the subsequent bullet-stripping logic inside WordListItemReplacement.
+        html = WordNonCommentConditionalRegex().Replace(html, string.Empty);
+
+        // <p class="MsoListParagraph"> / <p class="MsoListBullet"> (Mso list class form)
         html = WordListParagraphPRegex().Replace(html, m => WordListItemReplacement(m, contentGroup: 1));
+        // <h1 class="MsoListBullet"> etc. (heading-tagged first items in each group)
         html = WordListParagraphHxRegex().Replace(html, m => WordListItemReplacement(m, contentGroup: 1));
+        // <p class=MsoNormal style='...mso-list:l0 level1...'> (browser/web-origin Word HTML)
+        html = WordMsoListInlineStylePRegex().Replace(html, m => WordListItemReplacement(m, contentGroup: 1));
         return html;
     }
 
@@ -178,14 +194,23 @@ public static partial class HtmlToMarkdownConverter
         if (string.IsNullOrWhiteSpace(content))
             return string.Empty;
 
-        // Determine nesting level from margin-left in the full match (opening tag).
-        var marginMatch = MarginLeftPtRegex().Match(m.Value);
+        // Determine nesting level — prefer mso-list level\d (reliable across sources);
+        // fall back to margin-left pt calculation for older Word HTML.
         var indent = 0;
-        if (marginMatch.Success && double.TryParse(marginMatch.Groups[1].Value,
-                System.Globalization.NumberStyles.Float,
-                System.Globalization.CultureInfo.InvariantCulture, out var pts))
+        var levelMatch = MsoListLevelRegex().Match(m.Value);
+        if (levelMatch.Success && int.TryParse(levelMatch.Groups[1].Value, out var level))
         {
-            indent = Math.Max(0, (int)Math.Round(pts / 36.0) - 1);
+            indent = Math.Max(0, level - 1);
+        }
+        else
+        {
+            var marginMatch = MarginLeftPtRegex().Match(m.Value);
+            if (marginMatch.Success && double.TryParse(marginMatch.Groups[1].Value,
+                    System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out var pts))
+            {
+                indent = Math.Max(0, (int)Math.Round(pts / 36.0) - 1);
+            }
         }
 
         var indentStr = new string(' ', indent * 2) + "- ";
@@ -726,9 +751,14 @@ public static partial class HtmlToMarkdownConverter
 
     // ── Office / Word HTML stripping ─────────────────────────────────────────
 
-    // Word conditional comments: <!--[if ...]>...<![endif]--> (non-greedy, dotall)
+    // Word conditional comments (comment form): <!--[if ...]>...<![endif]-->
     [GeneratedRegex(@"<!--\[if[^\]]*\]>.*?<!\[endif\]-->", RegexOptions.IgnoreCase | RegexOptions.Singleline)]
     private static partial Regex WordConditionalCommentRegex();
+
+    // Word non-comment IE conditionals: <![if ...]>...</![endif]>
+    // Used around bullet indicator spans in browser/web-origin Word HTML.
+    [GeneratedRegex(@"<!\[if[^\]]*\]>.*?<!\[endif\]>", RegexOptions.IgnoreCase | RegexOptions.Singleline)]
+    private static partial Regex WordNonCommentConditionalRegex();
 
     // Office XML namespace elements: <o:p>, <w:anything>, <m:anything>, <v:anything>
     // Matches both paired (<o:p>...</o:p>) and self-closing (<o:p/>) forms.
@@ -738,6 +768,10 @@ public static partial class HtmlToMarkdownConverter
     // style="..." attributes containing mso-* properties — captured for partial cleanup
     [GeneratedRegex(@"style=""([^""]*)""", RegexOptions.IgnoreCase)]
     private static partial Regex MsoStyleAttributeRegex();
+
+    // style='...' single-quoted variant (browser/web-origin Word HTML)
+    [GeneratedRegex(@"style='([^']*)'"  , RegexOptions.IgnoreCase)]
+    private static partial Regex MsoStyleAttributeSingleQuoteRegex();
 
     // Individual mso-* CSS properties within a style value (e.g. mso-list:l0 level1 lfo1;)
     [GeneratedRegex(@"mso-[^;""]+;?\s*", RegexOptions.IgnoreCase)]
@@ -756,13 +790,24 @@ public static partial class HtmlToMarkdownConverter
     [GeneratedRegex(@"<h[1-6]\b(?=[^>]*class=""Mso(?:List|Body)[^""]*"")[^>]*>(.*?)</h[1-6]>", RegexOptions.IgnoreCase | RegexOptions.Singleline)]
     private static partial Regex WordListParagraphHxRegex();
 
+    // <p> whose inline style contains mso-list: — browser/web-origin Word HTML list items.
+    // These use class=MsoNormal but mark list membership via mso-list: in the style attribute.
+    [GeneratedRegex(@"<p\b(?=[^>]*mso-list\s*:)[^>]*>(.*?)</p>", RegexOptions.IgnoreCase | RegexOptions.Singleline)]
+    private static partial Regex WordMsoListInlineStylePRegex();
+
+    // mso-list level number: "mso-list:l0 level2 lfo1" → group 1 = "2"
+    [GeneratedRegex(@"mso-list\s*:\s*\S+\s+level(\d+)", RegexOptions.IgnoreCase)]
+    private static partial Regex MsoListLevelRegex();
+
     // <span style="mso-list:Ignore"> — the hidden bullet indicator span Word inserts
     // These wrap the visible bullet glyph (e.g. · from Symbol font) and must be removed.
-    [GeneratedRegex(@"<span[^>]*style=""[^""]*mso-list\s*:\s*Ignore[^""]*""[^>]*>.*?</span>", RegexOptions.IgnoreCase | RegexOptions.Singleline)]
+    // Handles both double-quoted and single-quoted style attributes.
+    [GeneratedRegex(@"<span[^>]*style=[""'][^""']*mso-list\s*:\s*Ignore[^""']*[""'][^>]*>.*?</span>", RegexOptions.IgnoreCase | RegexOptions.Singleline)]
     private static partial Regex MsoListIgnoreSpanRegex();
 
     // <span style="font-family:Symbol"> or font-family:Wingdings — Word bullet font spans
-    [GeneratedRegex(@"<span[^>]*style=""[^""]*font-family\s*:\s*(?:Symbol|Wingdings)[^""]*""[^>]*>(.*?)</span>", RegexOptions.IgnoreCase | RegexOptions.Singleline)]
+    // Handles both double-quoted and single-quoted style attributes.
+    [GeneratedRegex(@"<span[^>]*style=[""'][^""']*font-family\s*:\s*(?:Symbol|Wingdings)[^""']*[""'][^>]*>(.*?)</span>", RegexOptions.IgnoreCase | RegexOptions.Singleline)]
     private static partial Regex WordBulletFontSpanRegex();
 
     // Leading bullet/arrow glyphs that Word or Unicode uses as list markers (·, •, ▪, ◦, ─, –)
