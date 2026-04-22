@@ -19,9 +19,16 @@ All notable changes to MarkUp Markdown Editor will be documented in this file.
   `<!--EndFragment-->` content (or byte-offset-delimited range as fallback), discarding the
   surrounding `<html>/<head>/<body>` shell that clipboard providers add.
 - **Word/Office HTML pre-processing** in the HTML→Markdown converter: Strips `<o:p>`, `<w:*>`,
-  `<m:*>`, `<v:*>` namespace elements, Word conditional comments, `mso-*` CSS properties, and
-  `lang` attributes before structural conversion. Converts `MsoListParagraph`/`MsoListBullet`
-  paragraphs to Markdown unordered list items with correct indentation from `margin-left`.
+  `<m:*>`, `<v:*>` namespace elements, Word conditional comments (both comment-form
+  `<!--[if...]-->` and non-comment-form `<![if...]>`), `mso-*` CSS properties, and `lang`
+  attributes before structural conversion.
+- **Browser/web-origin Word HTML list support**: Detects list items encoded as
+  `<p class=MsoNormal style='...mso-list:l0 level1 lfo1...'>` — the pattern produced when
+  copying from a web page (e.g. a GitHub README) via Word's clipboard engine — and converts
+  them to Markdown bullet items with correct nesting from the `level\d` value.
+- **Native Word document list support**: Converts `MsoListParagraph`/`MsoListBullet` class
+  paragraphs and heading-tagged first list items (`<h1 class="MsoListBullet">`) to Markdown
+  unordered list items with correct indentation.
 - **Combined bold+italic span handling**: Recognises `<span style="font-weight:bold;
   font-style:italic;">` in both attribute orderings and emits `***text***`.
 - **Preview refresh on file open**: Opening a file now forces the preview to refresh even when
@@ -29,6 +36,16 @@ All notable changes to MarkUp Markdown Editor will be documented in this file.
   keypress to trigger the first render of the new document.
 
 ### Fixed
+- **Bullet glyphs (`·`) appearing in pasted list content**: The `<![if !supportLists]>` block
+  containing the visual bullet character is now fully stripped before conversion, so no `·`,
+  `•`, or similar glyph appears in the resulting Markdown.
+- **Word `<h1 class="MsoListBullet">` producing a heading instead of a list item**: Word
+  generates heading-tagged elements for the first list item of each group; these are now
+  correctly converted to `- ` list items rather than `# ` headings.
+- **Empty Word heading separators producing stray `# ` lines**: Empty `<h1>` elements that
+  Word emits as visual section separators now produce no output.
+- **Multi-line heading content splitting across output lines**: Heading content that spans
+  a newline in the source HTML (e.g. long bold text in Word) is now collapsed to a single line.
 - **Stale preview after opening a second file**: `LoadFileFromPathAsync` now calls
   `UpdatePreviewAsync(forceWhenPreviewFocused: true)` instead of the plain `UpdatePreview()`,
   bypassing the focused-panel suppression guard that previously left the old document's preview
@@ -44,9 +61,11 @@ All notable changes to MarkUp Markdown Editor will be documented in this file.
 - `MarkdownDocumentTests`: Added `DocumentLoad_PreviewInitializedResetToFalse` and
   `DocumentLoad_AfterReset_NewContentIsReflected` to guard the reset-and-reload contract used
   by `LoadFileFromPathAsync`.
-- `HtmlToMarkdownConverterTests`: 23 new tests covering Office/Word HTML stripping, Word list
-  paragraph conversion (including indentation), combined bold+italic spans, and CF_HTML fragment
-  extraction (end-to-end and edge cases).
+- `HtmlToMarkdownConverterTests`: 37 new tests covering Office/Word HTML stripping, Word list
+  paragraph conversion (including indentation), browser-origin Word HTML list items, non-comment
+  IE conditional stripping, bullet glyph removal, combined bold+italic spans, empty heading
+  suppression, multi-line heading normalisation, and CF_HTML fragment extraction (end-to-end
+  and edge cases).
 - `FileWorkflowTests` (UI): Added `OpenNewFile_EditorUpdatesImmediately_WhenPreviewWasLastFocused`
   to guard against the stale-preview regression.
 - `EditWorkflowTests` (UI): Added `Paste_HtmlClipboard_InsertsMarkdownIntoEditor` to exercise
