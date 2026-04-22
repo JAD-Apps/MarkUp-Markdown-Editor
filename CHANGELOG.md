@@ -2,6 +2,56 @@
 
 All notable changes to MarkUp Markdown Editor will be documented in this file.
 
+## [1.7.0] - 2026-04-22
+
+### Added
+- **Rich-text paste — HTML to Markdown conversion**: Pasting HTML content (from browsers,
+  Microsoft Word, Outlook, or any app that writes CF_HTML to the clipboard) now automatically
+  converts the HTML to clean Markdown before inserting it into the editor. Bold, italic,
+  bold+italic, strikethrough, headings, links, images, tables, code blocks, blockquotes, and
+  ordered/unordered lists are all converted. Word/Office noise (namespace tags, `mso-*` styles,
+  conditional comments, `lang` attributes) is stripped before conversion.
+- **Rich-text paste into the preview pane**: When the preview pane has focus, pasting HTML
+  clipboard content converts it to Markdown and inserts it as plain text, keeping the Markdown
+  source and preview in sync.
+- **CF_HTML clipboard fragment extraction** (`HtmlToMarkdownConverter.ExtractCfHtmlFragment`):
+  Parses the Windows CF_HTML clipboard format to extract only the `<!--StartFragment-->`...
+  `<!--EndFragment-->` content (or byte-offset-delimited range as fallback), discarding the
+  surrounding `<html>/<head>/<body>` shell that clipboard providers add.
+- **Word/Office HTML pre-processing** in the HTML→Markdown converter: Strips `<o:p>`, `<w:*>`,
+  `<m:*>`, `<v:*>` namespace elements, Word conditional comments, `mso-*` CSS properties, and
+  `lang` attributes before structural conversion. Converts `MsoListParagraph`/`MsoListBullet`
+  paragraphs to Markdown unordered list items with correct indentation from `margin-left`.
+- **Combined bold+italic span handling**: Recognises `<span style="font-weight:bold;
+  font-style:italic;">` in both attribute orderings and emits `***text***`.
+- **Preview refresh on file open**: Opening a file now forces the preview to refresh even when
+  the preview pane was last focused, eliminating the stale-preview regression that required a
+  keypress to trigger the first render of the new document.
+
+### Fixed
+- **Stale preview after opening a second file**: `LoadFileFromPathAsync` now calls
+  `UpdatePreviewAsync(forceWhenPreviewFocused: true)` instead of the plain `UpdatePreview()`,
+  bypassing the focused-panel suppression guard that previously left the old document's preview
+  visible until the user typed or clicked.
+
+### Changed
+- **IL trimming disabled for all build configurations**: `PublishTrimmed` is now permanently
+  `False`. WinUI 3 / Windows App SDK are not trim-compatible; enabling trimming caused Microsoft
+  Store submissions to fail at runtime with `MissingMethodException`. `ReadyToRun` is kept
+  for Release builds to preserve JIT warm-up performance.
+
+### Tests
+- `MarkdownDocumentTests`: Added `DocumentLoad_PreviewInitializedResetToFalse` and
+  `DocumentLoad_AfterReset_NewContentIsReflected` to guard the reset-and-reload contract used
+  by `LoadFileFromPathAsync`.
+- `HtmlToMarkdownConverterTests`: 23 new tests covering Office/Word HTML stripping, Word list
+  paragraph conversion (including indentation), combined bold+italic spans, and CF_HTML fragment
+  extraction (end-to-end and edge cases).
+- `FileWorkflowTests` (UI): Added `OpenNewFile_EditorUpdatesImmediately_WhenPreviewWasLastFocused`
+  to guard against the stale-preview regression.
+- `EditWorkflowTests` (UI): Added `Paste_HtmlClipboard_InsertsMarkdownIntoEditor` to exercise
+  the async paste plumbing end-to-end.
+
 ## [1.6.0] - 2026-03-24
 
 ### Added
