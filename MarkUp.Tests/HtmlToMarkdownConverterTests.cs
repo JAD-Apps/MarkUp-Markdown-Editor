@@ -916,4 +916,118 @@ public class HtmlToMarkdownConverterTests
     }
 
     #endregion
+
+    #region Word heading-tagged list items (h1-h6 with MsoList class)
+
+    [TestMethod]
+    public void Convert_WordListH1Class_ProducesListItemNotHeading()
+    {
+        // Word sometimes wraps the first list item of a section in <h1 class="MsoListBullet">
+        // rather than <p class="MsoListParagraph">. The converter must treat these as list
+        // items, not headings — no '#' prefix should appear in the output.
+        const string html = "<h1 class=\"MsoListBullet\" style=\"margin-left:36.0pt\">" +
+                            "New \u2014 Start a fresh document</h1>";
+        var result = HtmlToMarkdownConverter.Convert(html);
+        Assert.IsTrue(result.StartsWith("- "), $"Expected list item, got: {result}");
+        Assert.IsFalse(result.StartsWith("#"), $"Must not produce a heading: {result}");
+        Assert.IsTrue(result.Contains("New"), $"Content missing: {result}");
+    }
+
+    [TestMethod]
+    public void Convert_WordListH2Class_ProducesListItem()
+    {
+        const string html = "<h2 class=\"MsoListParagraph\" style=\"margin-left:36.0pt\">" +
+                            "Open \u2014 Open any text file</h2>";
+        var result = HtmlToMarkdownConverter.Convert(html);
+        Assert.IsTrue(result.StartsWith("- "), $"Expected list item, got: {result}");
+        Assert.IsFalse(result.StartsWith("#"), $"Must not produce a heading: {result}");
+    }
+
+    [TestMethod]
+    public void Convert_WordListH1WithMsoIgnoreSpan_BulletGlyphNotInOutput()
+    {
+        // Word injects <span style="mso-list:Ignore">·<span>&nbsp;&nbsp;&nbsp;</span></span>
+        // before the visible list text. The · and surrounding whitespace must be stripped.
+        const string html = "<h1 class=\"MsoListBullet\" style=\"margin-left:36.0pt\">" +
+                            "<span style=\"mso-list:Ignore\">\u00B7<span>&nbsp;&nbsp;&nbsp;</span></span>" +
+                            "New Tab \u2014 Open an additional editor tab</h1>";
+        var result = HtmlToMarkdownConverter.Convert(html);
+        Assert.IsFalse(result.Contains("\u00B7"), $"Middle dot must be stripped: {result}");
+        Assert.IsTrue(result.StartsWith("- "), $"Expected list item: {result}");
+        Assert.IsTrue(result.Contains("New Tab"), $"Content must be preserved: {result}");
+    }
+
+    [TestMethod]
+    public void Convert_WordListParagraphWithMsoIgnoreSpan_BulletGlyphNotInOutput()
+    {
+        // Same pattern in the <p class="MsoListParagraph"> variant.
+        const string html = "<p class=\"MsoListParagraph\" style=\"margin-left:36.0pt\">" +
+                            "<span style=\"font-family:Symbol;mso-list:Ignore\">\u00B7</span>" +
+                            "Close Tab \u2014 Close the current tab (Ctrl+W)</p>";
+        var result = HtmlToMarkdownConverter.Convert(html);
+        Assert.IsFalse(result.Contains("\u00B7"), $"Middle dot must be stripped: {result}");
+        Assert.IsTrue(result.StartsWith("- "), $"Expected list item: {result}");
+    }
+
+    [TestMethod]
+    public void Convert_EmptyH1_ProducesNoOutput()
+    {
+        // Word emits empty <h1> elements as visual section separators; they must not
+        // produce stray '#' lines in the Markdown output.
+        const string html = "<h1></h1><p>Hello</p>";
+        var result = HtmlToMarkdownConverter.Convert(html);
+        Assert.IsFalse(result.Contains("#"), $"Empty heading must produce no output: {result}");
+        Assert.IsTrue(result.Contains("Hello"), $"Paragraph content must be preserved: {result}");
+    }
+
+    [TestMethod]
+    public void Convert_HeadingWithInternalNewline_OutputIsSingleLine()
+    {
+        // When Word HTML has a heading whose content spans a newline (e.g. long bold text
+        // wrapped by the HTML source), the converter must produce a single-line heading.
+        const string html = "<h1>A lightweight,\nmodern Notepad clone</h1>";
+        var result = HtmlToMarkdownConverter.Convert(html);
+        Assert.IsTrue(result.StartsWith("# A lightweight, modern Notepad clone"),
+            $"Expected single-line heading, got: {result}");
+    }
+
+    [TestMethod]
+    public void Convert_MultipleWordListSections_NoStrayHeadings()
+    {
+        // Reproduces the structure from the user-reported paste: two list groups each
+        // starting with an <h1 class="MsoListBullet"> followed by <p class="MsoListParagraph">.
+        // No '#' heading markers should appear in the output.
+        const string html =
+            "<h3>File Operations</h3>" +
+            "<h1 class=\"MsoListBullet\" style=\"margin-left:36.0pt\">New \u2014 Start fresh</h1>" +
+            "<p class=\"MsoListParagraph\" style=\"margin-left:36.0pt\">Open \u2014 Open a file</p>" +
+            "<h3>Edit Operations</h3>" +
+            "<h1 class=\"MsoListBullet\" style=\"margin-left:36.0pt\">Undo / Redo \u2014 Ctrl+Z / Ctrl+Y</h1>" +
+            "<p class=\"MsoListParagraph\" style=\"margin-left:36.0pt\">Cut / Copy / Paste</p>";
+
+        var result = HtmlToMarkdownConverter.Convert(html);
+
+        // Proper headings should still be present
+        Assert.IsTrue(result.Contains("### File Operations"), $"Section heading missing: {result}");
+        Assert.IsTrue(result.Contains("### Edit Operations"), $"Section heading missing: {result}");
+
+        // List items must be bullet items, not headings
+        var lines = result.Split('\n');
+        foreach (var line in lines)
+        {
+            var trimmed = line.Trim();
+            if (trimmed.StartsWith("#"))
+            {
+                // Only the h3 section headings are allowed
+                Assert.IsTrue(trimmed.StartsWith("###"),
+                    $"Unexpected heading level in list area: '{trimmed}'");
+            }
+        }
+
+        Assert.IsTrue(result.Contains("- New"), $"List item 'New' missing: {result}");
+        Assert.IsTrue(result.Contains("- Open"), $"List item 'Open' missing: {result}");
+        Assert.IsTrue(result.Contains("- Undo"), $"List item 'Undo' missing: {result}");
+    }
+
+    #endregion
 }

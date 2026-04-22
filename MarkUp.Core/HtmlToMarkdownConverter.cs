@@ -140,32 +140,56 @@ public static partial class HtmlToMarkdownConverter
 
     /// <summary>
     /// Converts Word-style list paragraph elements to Markdown unordered list items.
-    /// Word uses &lt;p class="MsoListParagraph"&gt; or &lt;p class="MsoListBullet"&gt;
-    /// instead of semantic &lt;ul&gt;/&lt;li&gt; elements. Indentation level is inferred
-    /// from the margin-left CSS value (36pt ≈ level 1, 72pt ≈ level 2, etc.).
+    /// Word uses &lt;p class="MsoListParagraph"&gt; for most list items but also
+    /// &lt;h1 class="MsoListBullet"&gt; (or h2-h6) for the first item of each group.
+    /// Two regexes handle the two forms; both delegate to the same conversion helper.
+    ///
+    /// Before stripping tags the inner HTML is cleaned of:
+    ///  • mso-list:Ignore spans — the hidden bullet indicator Word inserts
+    ///  • Symbol/Wingdings font spans — carry the visible bullet glyph (· etc.)
+    /// After stripping tags the resulting text is cleaned of any residual leading
+    /// bullet glyphs and internal whitespace runs are collapsed.
+    /// Indentation level is inferred from the margin-left CSS value (36pt ≈ level 1).
     /// </summary>
     private static string ConvertWordListParagraphs(string html)
     {
-        return WordListParagraphRegex().Replace(html, m =>
+        html = WordListParagraphPRegex().Replace(html, m => WordListItemReplacement(m, contentGroup: 1));
+        html = WordListParagraphHxRegex().Replace(html, m => WordListItemReplacement(m, contentGroup: 1));
+        return html;
+    }
+
+    private static string WordListItemReplacement(Match m, int contentGroup)
+    {
+        var innerHtml = m.Groups[contentGroup].Value;
+
+        // Strip the hidden mso-list:Ignore bullet indicator span (and its content)
+        innerHtml = MsoListIgnoreSpanRegex().Replace(innerHtml, string.Empty);
+        // Strip Symbol/Wingdings font spans (carry the visual bullet glyph)
+        innerHtml = WordBulletFontSpanRegex().Replace(innerHtml, string.Empty);
+
+        // Extract text, collapse internal whitespace runs (Word HTML has \t and multiple spaces)
+        var content = StripHtmlTags(innerHtml);
+        content = System.Text.RegularExpressions.Regex.Replace(content, @"[ \t]+", " ");
+        content = System.Text.RegularExpressions.Regex.Replace(content, @"\s*\n\s*", " ");
+        // Remove any leading bullet/arrow glyph that survived (·, •, –, etc.)
+        content = LeadingBulletGlyphRegex().Replace(content, string.Empty);
+        content = content.Trim();
+
+        if (string.IsNullOrWhiteSpace(content))
+            return string.Empty;
+
+        // Determine nesting level from margin-left in the full match (opening tag).
+        var marginMatch = MarginLeftPtRegex().Match(m.Value);
+        var indent = 0;
+        if (marginMatch.Success && double.TryParse(marginMatch.Groups[1].Value,
+                System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var pts))
         {
-            // Group 1 = paragraph content (the new regex uses a lookahead for class,
-            // so only one capturing group is present).
-            var content = StripHtmlTags(m.Groups[1].Value).Trim();
+            indent = Math.Max(0, (int)Math.Round(pts / 36.0) - 1);
+        }
 
-            // Determine nesting level from margin-left in the full opening tag.
-            // Search the full match value for margin-left so attribute order doesn't matter.
-            var marginMatch = MarginLeftPtRegex().Match(m.Value);
-            var indent = 0;
-            if (marginMatch.Success && double.TryParse(marginMatch.Groups[1].Value,
-                    System.Globalization.NumberStyles.Float,
-                    System.Globalization.CultureInfo.InvariantCulture, out var pts))
-            {
-                indent = Math.Max(0, (int)Math.Round(pts / 36.0) - 1);
-            }
-
-            var prefix = new string(' ', indent * 2) + "- ";
-            return $"\n{prefix}{content}";
-        });
+        var indentStr = new string(' ', indent * 2) + "- ";
+        return $"\n{indentStr}{content}";
     }
 
     private static string ConvertCodeBlocks(string html)
@@ -196,7 +220,12 @@ public static partial class HtmlToMarkdownConverter
                 RegexOptions.IgnoreCase | RegexOptions.Singleline);
             html = pattern.Replace(html, m =>
             {
-                var content = StripHtmlTags(m.Groups[1].Value).Trim();
+                var content = StripHtmlTags(m.Groups[1].Value);
+                // Collapse any internal whitespace runs (including newlines from Word HTML)
+                content = System.Text.RegularExpressions.Regex.Replace(content, @"\s+", " ").Trim();
+                // Skip empty headings — Word emits empty <h1> as section separators
+                if (string.IsNullOrWhiteSpace(content))
+                    return string.Empty;
                 var prefix = new string('#', level);
                 return $"\n\n{prefix} {content}\n\n";
             });
@@ -718,11 +747,27 @@ public static partial class HtmlToMarkdownConverter
     [GeneratedRegex(@"\s+lang=""[^""]*""", RegexOptions.IgnoreCase)]
     private static partial Regex WordLangAttributeRegex();
 
-    // Word list paragraphs: <p class="MsoListParagraph[...]" style="...">content</p>
-    // Also matches MsoListBullet, MsoListNumber, etc.
-    // Uses a lookahead to require both class and style attributes without prescribing order.
+    // Word list paragraphs using a <p> block tag with an Mso list/body class.
     [GeneratedRegex(@"<p\b(?=[^>]*class=""Mso(?:List|Body)[^""]*"")[^>]*>(.*?)</p>", RegexOptions.IgnoreCase | RegexOptions.Singleline)]
-    private static partial Regex WordListParagraphRegex();
+    private static partial Regex WordListParagraphPRegex();
+
+    // Word list paragraphs using an <h1>–<h6> block tag with an Mso list/body class.
+    // Word generates heading-tagged first items for each list group rather than <p>.
+    [GeneratedRegex(@"<h[1-6]\b(?=[^>]*class=""Mso(?:List|Body)[^""]*"")[^>]*>(.*?)</h[1-6]>", RegexOptions.IgnoreCase | RegexOptions.Singleline)]
+    private static partial Regex WordListParagraphHxRegex();
+
+    // <span style="mso-list:Ignore"> — the hidden bullet indicator span Word inserts
+    // These wrap the visible bullet glyph (e.g. · from Symbol font) and must be removed.
+    [GeneratedRegex(@"<span[^>]*style=""[^""]*mso-list\s*:\s*Ignore[^""]*""[^>]*>.*?</span>", RegexOptions.IgnoreCase | RegexOptions.Singleline)]
+    private static partial Regex MsoListIgnoreSpanRegex();
+
+    // <span style="font-family:Symbol"> or font-family:Wingdings — Word bullet font spans
+    [GeneratedRegex(@"<span[^>]*style=""[^""]*font-family\s*:\s*(?:Symbol|Wingdings)[^""]*""[^>]*>(.*?)</span>", RegexOptions.IgnoreCase | RegexOptions.Singleline)]
+    private static partial Regex WordBulletFontSpanRegex();
+
+    // Leading bullet/arrow glyphs that Word or Unicode uses as list markers (·, •, ▪, ◦, ─, –)
+    [GeneratedRegex(@"^[\u00B7\u2022\u25AA\u25E6\u2013\u2014\u2212\-]\s*")]
+    private static partial Regex LeadingBulletGlyphRegex();
 
     // margin-left value in points inside a style attribute (e.g. margin-left:36.0pt)
     [GeneratedRegex(@"margin-left\s*:\s*([\d.]+)pt", RegexOptions.IgnoreCase)]
