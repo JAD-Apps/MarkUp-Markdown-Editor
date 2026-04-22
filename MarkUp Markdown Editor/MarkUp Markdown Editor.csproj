@@ -76,8 +76,10 @@
        causes Store submissions to fail at runtime with MissingMethodException.
        ReadyToRun is kept for Release to reduce JIT warm-up time. -->
   <PropertyGroup>
-    <PublishReadyToRun Condition="'$(Configuration)' == 'Debug'">False</PublishReadyToRun>
-    <PublishReadyToRun Condition="'$(Configuration)' != 'Debug'">True</PublishReadyToRun>
+    <!-- ReadyToRun requires a concrete RuntimeIdentifier; disable it when building an
+         AppxBundle (StoreUpload / multi-arch) where no single RID is provided. -->
+    <PublishReadyToRun Condition="'$(Configuration)' == 'Debug' or '$(AppxBundle)' == 'Always'">False</PublishReadyToRun>
+    <PublishReadyToRun Condition="'$(Configuration)' != 'Debug' and '$(AppxBundle)' != 'Always'">True</PublishReadyToRun>
     <PublishTrimmed>False</PublishTrimmed>
   </PropertyGroup>
 
