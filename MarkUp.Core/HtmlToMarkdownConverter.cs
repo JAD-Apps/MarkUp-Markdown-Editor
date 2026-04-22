@@ -21,6 +21,13 @@ public static partial class HtmlToMarkdownConverter
         // Normalize line endings and whitespace
         var text = html.Replace("\r\n", "\n").Replace("\r", "\n");
 
+        // Convert Word list paragraphs BEFORE stripping Office noise so that margin-left
+        // values (used for indent-level detection) are still present in the style attribute.
+        text = ConvertWordListParagraphs(text);
+
+        // Strip Office/Word XML namespace noise before any structural conversion
+        text = StripOfficeNamespaceTags(text);
+
         // Process block-level elements first (order matters)
         text = ConvertCodeBlocks(text);
         text = ConvertHeadings(text);
@@ -48,10 +55,118 @@ public static partial class HtmlToMarkdownConverter
         // Clean up excessive blank lines
         text = ExcessiveNewlinesRegex().Replace(text, "\n\n");
 
-        return text.Trim();
+        // Trim leading/trailing newlines only — not spaces, so that indented list items
+        // that appear first or last in a conversion result keep their indentation.
+        return text.Trim('\n', '\r');
+    }
+
+    /// <summary>
+    /// Extracts the clean HTML fragment from a CF_HTML clipboard format string.
+    /// The CF_HTML format is used by Windows clipboard (WinRT GetHtmlFormatAsync) and
+    /// prefixes the actual HTML with a byte-offset header block. This method strips that
+    /// header and returns only the content between the StartFragment/EndFragment markers,
+    /// matching the approach used by ReverseMarkdown and Turndown-based integrations.
+    /// Falls back to returning the full input string if no markers are present.
+    /// </summary>
+    public static string ExtractCfHtmlFragment(string cfHtml)
+    {
+        if (string.IsNullOrWhiteSpace(cfHtml))
+            return string.Empty;
+
+        // Try to find the explicit HTML comment markers first (most reliable)
+        const string startMarker = "<!--StartFragment-->";
+        const string endMarker = "<!--EndFragment-->";
+
+        var startIdx = cfHtml.IndexOf(startMarker, StringComparison.OrdinalIgnoreCase);
+        var endIdx = cfHtml.IndexOf(endMarker, StringComparison.OrdinalIgnoreCase);
+
+        if (startIdx >= 0 && endIdx > startIdx)
+        {
+            var fragmentStart = startIdx + startMarker.Length;
+            return cfHtml[fragmentStart..endIdx].Trim();
+        }
+
+        // Fall back: try byte-offset header fields (StartFragment: NNN / EndFragment: NNN)
+        var startFieldMatch = CfHtmlStartOffsetRegex().Match(cfHtml);
+        var endFieldMatch = CfHtmlEndOffsetRegex().Match(cfHtml);
+
+        if (startFieldMatch.Success && endFieldMatch.Success
+            && int.TryParse(startFieldMatch.Groups[1].Value, out var startOffset)
+            && int.TryParse(endFieldMatch.Groups[1].Value, out var endOffset)
+            && startOffset >= 0 && endOffset > startOffset && endOffset <= cfHtml.Length)
+        {
+            return cfHtml[startOffset..endOffset].Trim();
+        }
+
+        // No CF_HTML header found — return as-is (already plain HTML)
+        return cfHtml.Trim();
     }
 
     #region Block Elements
+
+    /// <summary>
+    /// Strips Office XML namespace tags and Word-specific markup that pollute HTML copied
+    /// from Microsoft Word or Outlook. Handles namespace-prefixed elements (o:p, w:*, m:*, v:*),
+    /// Word conditional comments, and mso-* style attributes. This replicates the pre-processing
+    /// step used by ReverseMarkdown and other HTML→Markdown converters for clipboard content.
+    /// </summary>
+    private static string StripOfficeNamespaceTags(string html)
+    {
+        // Strip Word conditional comments: <!--[if ...]>...</![endif]-->
+        html = WordConditionalCommentRegex().Replace(html, string.Empty);
+
+        // Strip Office XML namespace elements and their content: <o:p>, <w:*>, <m:*>, <v:*>
+        // These are always paired or self-closing in Word HTML.
+        html = OfficeNamespaceElementRegex().Replace(html, string.Empty);
+
+        // Strip mso-* style attributes that litter every Word span/paragraph
+        // e.g. style="mso-list:l0 level1 lfo1;margin-left:36.0pt;..."
+        // Keep the style attribute if it has non-mso content (font-weight, font-style etc.)
+        html = MsoStyleAttributeRegex().Replace(html, m =>
+        {
+            // Remove each mso-* property from the style value; keep non-mso properties
+            var styleValue = m.Groups[1].Value;
+            var cleaned = MsoPropertyRegex().Replace(styleValue, string.Empty).Trim().TrimEnd(';').Trim();
+            return cleaned.Length > 0 ? $"style=\"{cleaned}\"" : string.Empty;
+        });
+
+        // Strip Word-specific class attributes (MsoNormal, MsoListParagraph etc.)
+        // We preserve the class value itself — ConvertWordListParagraphs reads it.
+        // Only strip the lang attribute which is noise.
+        html = WordLangAttributeRegex().Replace(html, string.Empty);
+
+        return html;
+    }
+
+    /// <summary>
+    /// Converts Word-style list paragraph elements to Markdown unordered list items.
+    /// Word uses &lt;p class="MsoListParagraph"&gt; or &lt;p class="MsoListBullet"&gt;
+    /// instead of semantic &lt;ul&gt;/&lt;li&gt; elements. Indentation level is inferred
+    /// from the margin-left CSS value (36pt ≈ level 1, 72pt ≈ level 2, etc.).
+    /// </summary>
+    private static string ConvertWordListParagraphs(string html)
+    {
+        return WordListParagraphRegex().Replace(html, m =>
+        {
+            // Group 1 = paragraph content (the new regex uses a lookahead for class,
+            // so only one capturing group is present).
+            var content = StripHtmlTags(m.Groups[1].Value).Trim();
+
+            // Determine nesting level from margin-left in the full opening tag.
+            // Search the full match value for margin-left so attribute order doesn't matter.
+            var marginMatch = MarginLeftPtRegex().Match(m.Value);
+            var indent = 0;
+            if (marginMatch.Success && double.TryParse(marginMatch.Groups[1].Value,
+                    System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out var pts))
+            {
+                indent = Math.Max(0, (int)Math.Round(pts / 36.0) - 1);
+            }
+
+            var prefix = new string(' ', indent * 2) + "- ";
+            return $"\n{prefix}{content}";
+        });
+    }
 
     private static string ConvertCodeBlocks(string html)
     {
@@ -310,10 +425,16 @@ public static partial class HtmlToMarkdownConverter
 
     private static string ConvertInlineElements(string html)
     {
+        // Resolve combined bold+italic span before individual bold/italic spans
+        html = SpanBoldItalicRegex().Replace(html, "***$1***");
+        html = SpanItalicBoldRegex().Replace(html, "***$1***");
+
         // Resolve span-based formatting emitted by some browsers/editors
         html = SpanBoldRegex().Replace(html, "<strong>$1</strong>");
         html = SpanItalicRegex().Replace(html, "<em>$1</em>");
         html = SpanStrikeRegex().Replace(html, "<del>$1</del>");
+        // Font-size span has no Markdown equivalent — strip the tag, keep content
+        html = SpanFontSizeRegex().Replace(html, "$1");
         // Underline has no Markdown equivalent — strip the tag, keep content
         html = UnderlineTagRegex().Replace(html, "$1");
 
@@ -573,6 +694,63 @@ public static partial class HtmlToMarkdownConverter
 
     [GeneratedRegex(@"&#x([0-9a-fA-F]+);", RegexOptions.IgnoreCase)]
     private static partial Regex HexEntityRegex();
+
+    // ── Office / Word HTML stripping ─────────────────────────────────────────
+
+    // Word conditional comments: <!--[if ...]>...<![endif]--> (non-greedy, dotall)
+    [GeneratedRegex(@"<!--\[if[^\]]*\]>.*?<!\[endif\]-->", RegexOptions.IgnoreCase | RegexOptions.Singleline)]
+    private static partial Regex WordConditionalCommentRegex();
+
+    // Office XML namespace elements: <o:p>, <w:anything>, <m:anything>, <v:anything>
+    // Matches both paired (<o:p>...</o:p>) and self-closing (<o:p/>) forms.
+    [GeneratedRegex(@"<(?:o|w|m|v):[^>]*>.*?</(?:o|w|m|v):[^>]*>|<(?:o|w|m|v):[^/][^>]*/?>", RegexOptions.IgnoreCase | RegexOptions.Singleline)]
+    private static partial Regex OfficeNamespaceElementRegex();
+
+    // style="..." attributes containing mso-* properties — captured for partial cleanup
+    [GeneratedRegex(@"style=""([^""]*)""", RegexOptions.IgnoreCase)]
+    private static partial Regex MsoStyleAttributeRegex();
+
+    // Individual mso-* CSS properties within a style value (e.g. mso-list:l0 level1 lfo1;)
+    [GeneratedRegex(@"mso-[^;""]+;?\s*", RegexOptions.IgnoreCase)]
+    private static partial Regex MsoPropertyRegex();
+
+    // lang="..." attribute generated by Word on almost every element
+    [GeneratedRegex(@"\s+lang=""[^""]*""", RegexOptions.IgnoreCase)]
+    private static partial Regex WordLangAttributeRegex();
+
+    // Word list paragraphs: <p class="MsoListParagraph[...]" style="...">content</p>
+    // Also matches MsoListBullet, MsoListNumber, etc.
+    // Uses a lookahead to require both class and style attributes without prescribing order.
+    [GeneratedRegex(@"<p\b(?=[^>]*class=""Mso(?:List|Body)[^""]*"")[^>]*>(.*?)</p>", RegexOptions.IgnoreCase | RegexOptions.Singleline)]
+    private static partial Regex WordListParagraphRegex();
+
+    // margin-left value in points inside a style attribute (e.g. margin-left:36.0pt)
+    [GeneratedRegex(@"margin-left\s*:\s*([\d.]+)pt", RegexOptions.IgnoreCase)]
+    private static partial Regex MarginLeftPtRegex();
+
+    // ── CF_HTML clipboard format ──────────────────────────────────────────────
+
+    // StartFragment byte offset from the CF_HTML header (e.g. "StartFragment:000000097")
+    [GeneratedRegex(@"StartFragment:(\d+)", RegexOptions.IgnoreCase)]
+    private static partial Regex CfHtmlStartOffsetRegex();
+
+    // EndFragment byte offset from the CF_HTML header
+    [GeneratedRegex(@"EndFragment:(\d+)", RegexOptions.IgnoreCase)]
+    private static partial Regex CfHtmlEndOffsetRegex();
+
+    // ── Combined bold+italic span ────────────────────────────────────────────
+
+    // <span style="...font-weight:bold...font-style:italic..."> (any order)
+    [GeneratedRegex(@"<span[^>]*style=""[^""]*font-weight\s*:\s*(?:bold|700)[^""]*font-style\s*:\s*italic[^""]*""[^>]*>(.*?)</span>", RegexOptions.IgnoreCase | RegexOptions.Singleline)]
+    private static partial Regex SpanBoldItalicRegex();
+
+    // <span style="...font-style:italic...font-weight:bold..."> (italic first)
+    [GeneratedRegex(@"<span[^>]*style=""[^""]*font-style\s*:\s*italic[^""]*font-weight\s*:\s*(?:bold|700)[^""]*""[^>]*>(.*?)</span>", RegexOptions.IgnoreCase | RegexOptions.Singleline)]
+    private static partial Regex SpanItalicBoldRegex();
+
+    // <span style="...font-size:..."> — strip tag, keep content (no Markdown equivalent)
+    [GeneratedRegex(@"<span[^>]*style=""[^""]*font-size\s*:[^""]*""[^>]*>(.*?)</span>", RegexOptions.IgnoreCase | RegexOptions.Singleline)]
+    private static partial Regex SpanFontSizeRegex();
 
     #endregion
 }
