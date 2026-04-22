@@ -1149,32 +1149,110 @@ public sealed partial class MainWindow : Window
     {
         if (_lastFocusedPanel == FocusedPanel.Preview)
         {
-            _ = PreviewWebView.CoreWebView2?.ExecuteScriptAsync(
-                "navigator.clipboard.readText().then(function(t){document.execCommand('insertText',false,t)}).catch(function(){document.execCommand('paste')})");
+            await PasteRichTextIntoPreviewAsync();
             return;
         }
 
-        // Paste into editor — read clipboard and insert at the current cursor position.
-        // We do this manually (rather than calling EditorTextBox.Paste()) so we can ensure
-        // _document.Content stays in sync and the preview updates.
-        var content = Clipboard.GetContent();
-        if (content.Contains(StandardDataFormats.Text))
-        {
-            var text = await content.GetTextAsync();
-            var start = EditorTextBox.SelectionStart;
-            var fullText = EditorTextBox.Text;
-            var newText = fullText.Remove(start, EditorTextBox.SelectionLength).Insert(start, text);
-            _suppressTextChanged = true;
-            EditorTextBox.Text = newText;
-            EditorTextBox.SelectionStart = start + text.Length;
-            _suppressTextChanged = false;
-            _document.Content = EditorTextBox.Text;
-            UpdateTitle();
-            UpdateStatusBar();
-            _previewTimer.Stop();
-            _previewTimer.Start();
-        }
+        await PasteRichTextIntoEditorAsync();
     }
+
+    /// <summary>
+    /// Pastes clipboard content into the preview WebView2 pane.
+    /// When the clipboard contains HTML (CF_HTML), the raw HTML is converted to Markdown
+    /// and inserted as plain text so that the preview re-renders cleanly. When only plain
+    /// text is available, the original execCommand path is used as a fallback.
+    /// </summary>
+    private async Task PasteRichTextIntoPreviewAsync()
+    {
+        var content = Clipboard.GetContent();
+
+        if (content.Contains(StandardDataFormats.Html))
+        {
+            try
+            {
+                var cfHtml = await content.GetHtmlFormatAsync();
+                var fragment = HtmlToMarkdownConverter.ExtractCfHtmlFragment(cfHtml);
+                var markdown = HtmlToMarkdownConverter.Convert(fragment);
+
+                // Escape the markdown so it can be embedded in a JS string literal
+                var escaped = EscapeForJsString(markdown);
+                _ = PreviewWebView.CoreWebView2?.ExecuteScriptAsync(
+                    $"document.execCommand('insertText', false, '{escaped}')");
+                return;
+            }
+            catch
+            {
+                // Fall through to plain-text fallback
+            }
+        }
+
+        // Plain-text fallback (original behaviour)
+        _ = PreviewWebView.CoreWebView2?.ExecuteScriptAsync(
+            "navigator.clipboard.readText().then(function(t){document.execCommand('insertText',false,t)}).catch(function(){document.execCommand('paste')})");
+    }
+
+    /// <summary>
+    /// Pastes clipboard content into the Markdown editor text box.
+    /// When the clipboard contains HTML (CF_HTML), the HTML is converted to Markdown before
+    /// insertion so that copied rich text from browsers, Word, or Outlook arrives as clean
+    /// Markdown rather than raw HTML. Falls back to plain text when no HTML is present.
+    /// </summary>
+    private async Task PasteRichTextIntoEditorAsync()
+    {
+        var content = Clipboard.GetContent();
+
+        string textToInsert;
+
+        if (content.Contains(StandardDataFormats.Html))
+        {
+            try
+            {
+                var cfHtml = await content.GetHtmlFormatAsync();
+                var fragment = HtmlToMarkdownConverter.ExtractCfHtmlFragment(cfHtml);
+                textToInsert = HtmlToMarkdownConverter.Convert(fragment);
+            }
+            catch
+            {
+                // Fall through to plain text
+                textToInsert = content.Contains(StandardDataFormats.Text)
+                    ? await content.GetTextAsync()
+                    : string.Empty;
+            }
+        }
+        else if (content.Contains(StandardDataFormats.Text))
+        {
+            textToInsert = await content.GetTextAsync();
+        }
+        else
+        {
+            return;
+        }
+
+        if (string.IsNullOrEmpty(textToInsert))
+            return;
+
+        var start = EditorTextBox.SelectionStart;
+        var fullText = EditorTextBox.Text;
+        var newText = fullText.Remove(start, EditorTextBox.SelectionLength).Insert(start, textToInsert);
+        _suppressTextChanged = true;
+        EditorTextBox.Text = newText;
+        EditorTextBox.SelectionStart = start + textToInsert.Length;
+        _suppressTextChanged = false;
+        _document.Content = EditorTextBox.Text;
+        UpdateTitle();
+        UpdateStatusBar();
+        _previewTimer.Stop();
+        _previewTimer.Start();
+    }
+
+    /// <summary>Escapes a string for safe embedding inside a JS single-quoted string literal.</summary>
+    private static string EscapeForJsString(string value) =>
+        value
+            .Replace("\\", "\\\\")
+            .Replace("'", "\\'")
+            .Replace("\r\n", "\\n")
+            .Replace("\n", "\\n")
+            .Replace("\r", "\\n");
 
     private void MenuSelectAll_Click(object sender, RoutedEventArgs e)
     {
