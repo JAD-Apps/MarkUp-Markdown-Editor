@@ -1,5 +1,9 @@
 # MarkUp Markdown Editor
 
+![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D4?logo=windows&logoColor=white)
+![.NET](https://img.shields.io/badge/.NET-8.0-512BD4?logo=dotnet&logoColor=white)
+![WinUI 3](https://img.shields.io/badge/WinUI-3-0078D4)
+
 A modern, dark-mode Markdown editor and viewer for Windows, built with WinUI 3 and the Windows App SDK.
 
 ## Features
