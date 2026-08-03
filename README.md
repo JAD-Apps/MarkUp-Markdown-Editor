@@ -7,6 +7,10 @@
 [![License](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-blue.svg)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/JAD-Apps/MarkUp-Markdown-Editor?label=download&logo=github)](https://github.com/JAD-Apps/MarkUp-Markdown-Editor/releases/latest)
 
+<p align="center">
+<img src="docs/media/markup-split-view.png" alt="MarkUp in split view with the Markdown source on the left and the rendered preview on the right, showing a heading, body text and a formatted table" width="900">
+</p>
+
 A modern, dark-mode Markdown editor and viewer for Windows, built with WinUI 3 and the Windows App SDK.
 
 ## Download
@@ -25,6 +29,8 @@ Grab the latest portable build from [Releases](https://github.com/JAD-Apps/MarkU
 - **Full Markdown Support**: Headings, bold, italic, strikethrough, code blocks, tables, task lists, blockquotes, images, links, and more
 - **Formatting Toolbar**: Left-aligned quick-access toolbar buttons and keyboard shortcuts for all formatting operations
 - **Find & Replace**: Built-in find and replace with case-sensitive matching
+![The File menu with the Export submenu open, offering export as HTML, as plain text, and as PDF](docs/media/markup-export.png)
+
 - **Print & Export**: Clean printing with document title header and page numbers — no about:blank in footers; print to PDF, export to HTML, and export to plain text with proper font colour management
 - **Font Customization**: Configurable editor font family and size
 - **Zoom Controls**: Zoom in/out on the editor
