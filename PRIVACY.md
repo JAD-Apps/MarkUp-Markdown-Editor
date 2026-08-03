@@ -29,4 +29,4 @@ If this privacy policy changes, the updated version will be published in this re
 
 ## Contact
 
-If you have questions about this privacy policy, please open an issue on the [GitHub repository](https://github.com/John-Donnelly/MarkUp-Markdown-Editor).
+If you have questions about this privacy policy, please open an issue on the [GitHub repository](https://github.com/JAD-Apps/MarkUp-Markdown-Editor).
