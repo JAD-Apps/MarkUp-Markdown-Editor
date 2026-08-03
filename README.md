@@ -5,8 +5,16 @@
 ![.NET](https://img.shields.io/badge/.NET-8.0-512BD4?logo=dotnet&logoColor=white)
 ![WinUI 3](https://img.shields.io/badge/WinUI-3-0078D4)
 [![License](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-blue.svg)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/John-Donnelly/MarkUp-Markdown-Editor?label=download&logo=github)](https://github.com/John-Donnelly/MarkUp-Markdown-Editor/releases/latest)
 
 A modern, dark-mode Markdown editor and viewer for Windows, built with WinUI 3 and the Windows App SDK.
+
+## Download
+
+Grab the latest portable build from [Releases](https://github.com/John-Donnelly/MarkUp-Markdown-Editor/releases/latest) — unzip and run `MarkUp.exe`. Self-contained, so no .NET runtime is needed.
+
+> Builds are currently unsigned; Windows SmartScreen will warn on first run.
+> Choose **More info** → **Run anyway** if you trust the source.
 
 ## Features
 
