@@ -4,6 +4,7 @@
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D4?logo=windows&logoColor=white)
 ![.NET](https://img.shields.io/badge/.NET-8.0-512BD4?logo=dotnet&logoColor=white)
 ![WinUI 3](https://img.shields.io/badge/WinUI-3-0078D4)
+[![License](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-blue.svg)](LICENSE)
 
 A modern, dark-mode Markdown editor and viewer for Windows, built with WinUI 3 and the Windows App SDK.
 
@@ -53,4 +54,12 @@ A modern, dark-mode Markdown editor and viewer for Windows, built with WinUI 3 a
 
 ## License
 
-© 2026 JAD Apps. All rights reserved.
+MarkUp Markdown Editor is **source-available, not open source**, under the
+[PolyForm Noncommercial License 1.0.0](LICENSE).
+
+You may read, build and modify the source for any noncommercial purpose.
+Commercial use — including redistribution, resale, or publishing to an
+application store — is reserved to JAD Apps. For a commercial licence,
+get in touch via [jadapps.app](https://jadapps.app).
+
+© 2026 John Donnelly, trading as JAD Apps.
