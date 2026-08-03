@@ -11,6 +11,8 @@
 <img src="docs/media/markup-split-view.png" alt="MarkUp in split view with the Markdown source on the left and the rendered preview on the right, showing a heading, body text and a formatted table" width="900">
 </p>
 
+**Status:** released and actively developed · **Latest:** v1.7.0 · **Requires:** Windows 10 1809 (build 17763) or later
+
 A modern, dark-mode Markdown editor and viewer for Windows, built with WinUI 3 and the Windows App SDK.
 
 ## Download
