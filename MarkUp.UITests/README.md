@@ -23,6 +23,29 @@ http://192.168.0.100:4723
 `WinAppDriver.exe` must already be running on that remote Windows machine before the test run starts.
 The test project no longer starts a local WinAppDriver instance.
 
+#### Local mode (`UITEST_DRIVER_URL`)
+
+Set `UITEST_DRIVER_URL` to point the suite at any Appium endpoint — typically a locally
+started server — instead of the hard-wired remote host. When it is set, the remote WinRM
+package-install step is skipped, so also set `UITEST_REMOTE_APP` to the app to launch.
+Verified working local recipe (dev machine, WinAppDriver 1.2.1 + Appium 3 + windows driver installed):
+
+```powershell
+# 1. Build a self-contained unpackaged app (the plain Debug exe cannot start outside VS):
+dotnet build "MarkUp Markdown Editor/MarkUp Markdown Editor.csproj" -c Debug -p:Platform=x64 `
+  -p:WindowsPackageType=None -p:WindowsAppSDKSelfContained=true
+
+# 2. Start Appium locally. MARKUP_UITEST=1 is inherited by the app and disables settings
+#    persistence and the unsaved-changes close prompt, keeping runs deterministic:
+$env:MARKUP_UITEST = '1'
+npx appium server --address 127.0.0.1 --port 4723
+
+# 3. In another shell:
+$env:UITEST_DRIVER_URL = 'http://127.0.0.1:4723'
+$env:UITEST_REMOTE_APP = "$PWD\MarkUp Markdown Editor\bin\x64\Debug\net8.0-windows10.0.19041.0\win-x64\MarkUp Markdown Editor.exe"
+dotnet test MarkUp.UITests/MarkUp.UITests.csproj --filter "TestCategory=UITest"
+```
+
 To install Appium on the remote machine, install the Windows driver, and start the Appium server through WinRM, run:
 
 ```powershell

@@ -30,6 +30,14 @@ public abstract class AppSession
 
     /// <summary>WinAppDriver endpoint on the remote test machine.</summary>
     private const string RemoteDriverUrl = "http://192.168.0.100:4723";
+
+    /// <summary>
+    /// Optional override for the Appium/WinAppDriver endpoint (e.g. http://127.0.0.1:4723 to run
+    /// against a locally started Appium server). When set, the remote WinRM package-install step
+    /// is skipped — the app target must be supplied via UITEST_REMOTE_APP / UITEST_REMOTE_APP_PATH
+    /// or resolvable locally.
+    /// </summary>
+    private const string DriverUrlEnvironmentVariable = "UITEST_DRIVER_URL";
     private const string RemoteAppEnvironmentVariable = "UITEST_REMOTE_APP";
     private const string RemoteAppAumidEnvironmentVariable = "UITEST_REMOTE_AUMID";
     private const string RemoteAppPathEnvironmentVariable = "UITEST_REMOTE_APP_PATH";
@@ -47,7 +55,13 @@ public abstract class AppSession
         @"Z:\repos\MarkUp Markdown Editor\MarkUp Markdown Editor\bin\x64\Debug\net8.0-windows10.0.19041.0\win-x64\MarkUp Markdown Editor.exe";
 
     /// <summary>Active WinAppDriver URL for this workspace.</summary>
-    private static string DriverUrl => RemoteDriverUrl;
+    private static string DriverUrl =>
+        Environment.GetEnvironmentVariable(DriverUrlEnvironmentVariable) is { Length: > 0 } overrideUrl
+            ? overrideUrl
+            : RemoteDriverUrl;
+
+    private static bool IsDriverUrlOverridden =>
+        !string.IsNullOrEmpty(Environment.GetEnvironmentVariable(DriverUrlEnvironmentVariable));
 
     // Retry timing for FindById (no IPC during the sleep — purely in-process)
     private const int ElementRetryMs  = 200;
@@ -94,38 +108,52 @@ public abstract class AppSession
         string? installedAumid = null;
         string? packageInstallError = null;
 
-        try
+        if (IsDriverUrlOverridden)
         {
-            installedAumid = TryInstallLatestRemotePackage();
+            Trace.WriteLine("[UITests] Driver URL overridden — skipping remote WinRM package install.");
         }
-        catch (InvalidOperationException ex)
+        else
         {
-            packageInstallError = $"Could not install the latest remote package: {ex.Message}";
-            Trace.WriteLine($"[UITests] {packageInstallError}");
-        }
-
-        foreach (var appId in GetRemoteAppTargets(installedAumid))
-        {
-            Trace.WriteLine($"[UITests] Trying remote app target: {appId}");
             try
             {
-                Session = CreateRemoteAppSession(appId);
-                Session.Manage().Timeouts().ImplicitWait = TimeSpan.FromMilliseconds(2000);
-                DesktopSession = CreateRemoteDesktopSession();
-                DesktopSession.Manage().Timeouts().ImplicitWait = TimeSpan.FromMilliseconds(500);
-                if (!WarmUpSessionRoot())
-                    throw new WebDriverException(
-                        $"App editor 'EditorTextBox' did not appear on the remote machine within 30 seconds " +
-                        $"after launching '{appId}'. The app may not have started correctly.");
-                try { Session?.Manage().Window.Maximize(); Thread.Sleep(500); } catch { }
-                _lastSessionInitializationError = null;
-                return;
+                installedAumid = TryInstallLatestRemotePackage();
             }
-            catch (WebDriverException ex)
+            catch (InvalidOperationException ex)
             {
-                CleanupRemoteSessions();
-                _lastSessionInitializationError = $"Could not start remote session with '{appId}': {ex.Message}";
-                Trace.WriteLine($"[UITests] {_lastSessionInitializationError}");
+                packageInstallError = $"Could not install the latest remote package: {ex.Message}";
+                Trace.WriteLine($"[UITests] {packageInstallError}");
+            }
+        }
+
+        // Two passes over the target list: the very first app launch after a rebuild is
+        // cold (WebView2 profile creation, self-contained extraction) and can exceed
+        // WinAppDriver's ~25 s window-discovery timeout. The failed launch leaves the app
+        // warm, so an immediate second attempt reliably succeeds.
+        for (var attempt = 1; attempt <= 2; attempt++)
+        {
+            foreach (var appId in GetRemoteAppTargets(installedAumid))
+            {
+                Trace.WriteLine($"[UITests] Trying remote app target (attempt {attempt}): {appId}");
+                try
+                {
+                    Session = CreateRemoteAppSession(appId);
+                    Session.Manage().Timeouts().ImplicitWait = TimeSpan.FromMilliseconds(2000);
+                    DesktopSession = CreateRemoteDesktopSession();
+                    DesktopSession.Manage().Timeouts().ImplicitWait = TimeSpan.FromMilliseconds(500);
+                    if (!WarmUpSessionRoot())
+                        throw new WebDriverException(
+                            $"App editor 'EditorTextBox' did not appear on the remote machine within 30 seconds " +
+                            $"after launching '{appId}'. The app may not have started correctly.");
+                    try { Session?.Manage().Window.Maximize(); Thread.Sleep(500); } catch { }
+                    _lastSessionInitializationError = null;
+                    return;
+                }
+                catch (WebDriverException ex)
+                {
+                    CleanupRemoteSessions();
+                    _lastSessionInitializationError = $"Could not start remote session with '{appId}': {ex.Message}";
+                    Trace.WriteLine($"[UITests] {_lastSessionInitializationError}");
+                }
             }
         }
 
@@ -375,36 +403,16 @@ public abstract class AppSession
     protected static AppiumElement GetCachedElementWithin(ref AppiumElement? cache, ref AppiumElement? containerCache,
         string containerAutomationId, string automationId)
     {
-        AppiumElement container;
-        try
-        {
-            container = GetCachedElement(ref containerCache, containerAutomationId);
-        }
-        catch (NoSuchElementException)
-        {
-            cache = FindById(automationId);
-            return cache;
-        }
-
-        if (cache is not null)
-        {
-            try
-            {
-                _ = cache.Enabled;
-                return cache;
-            }
-            catch (Exception ex) when (IsRecoverableElementException(ex))
-            {
-                CleanupSession();
-                InitialiseSession();
-                containerCache = null;
-                container = GetCachedElement(ref containerCache, containerAutomationId);
-                cache = null;
-            }
-        }
-
-        cache = FindByIdWithin(container, automationId);
-        return cache;
+        // Container scoping is intentionally bypassed. The automation-bridge container
+        // is a Canvas, and XAML panels have no automation peer, so its AutomationId is
+        // not in the UIA tree at all: searching for it forces an exhaustive FindFirst
+        // walk of the whole window, which can block for minutes once it descends into
+        // the WebView2 accessibility subtree. The bridge CHILDREN are real controls
+        // with app-unique AutomationIds declared before the main content grid, so a
+        // root-scoped search finds them immediately without ever reaching the WebView2.
+        _ = containerAutomationId;
+        containerCache = null;
+        return GetCachedElement(ref cache, automationId);
     }
 
     private static bool IsRecoverableWindowException(Exception ex) =>
@@ -457,6 +465,18 @@ public abstract class AppSession
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Invokes one of the 1×1-pixel automation-bridge buttons via keyboard activation
+    /// (focus + Enter). Pointer-based Click() on sub-pixel targets is geometry-dependent
+    /// and silently misses on some Appium/WinAppDriver stacks; keyboard activation
+    /// raises the Click handler without any coordinate math.
+    /// </summary>
+    protected static void InvokeBridgeButton(AppiumElement button)
+    {
+        button.SendKeys(Keys.Enter);
+        Thread.Sleep(150);
     }
 
     protected static bool IsDisplayed(string automationId) =>
@@ -638,11 +658,67 @@ public abstract class AppSession
     private static void SendRemoteModifiedKeys(params string[] keys)
     {
         if (Session is null) return;
-        // Chord notation (e.g. Keys.Control + "a") routes through /element/{id}/value,
-        // which WinAppDriver supports. The W3C Actions keyboard input-source is NOT supported.
+
+        // Prefer REAL virtual-key injection via the windows driver's "windows: keys"
+        // command. The legacy element-chord path types letters as Unicode packets
+        // (VK_PACKET), which XAML KeyboardAccelerators can never match — so shortcut
+        // tests silently exercised nothing but the TextBox's control-character
+        // handling. Only chords whose non-modifier part maps cleanly to A-Z/0-9
+        // virtual keys use the new path; everything else falls back.
+        if (TrySendVirtualKeyChord(keys))
+        {
+            Thread.Sleep(200);
+            return;
+        }
+
         var chord = string.Concat(keys);
         SendKeysViaElement(chord);
         Thread.Sleep(200);
+    }
+
+    private static bool TrySendVirtualKeyChord(string[] keys)
+    {
+        var modifiers = new List<int>();
+        var vks = new List<int>();
+        foreach (var k in keys)
+        {
+            if (k == Keys.Control) { modifiers.Add(0x11); continue; }
+            if (k == Keys.Shift)   { modifiers.Add(0x10); continue; }
+            if (k == Keys.Alt)     { modifiers.Add(0x12); continue; }
+            foreach (var ch in k)
+            {
+                var upper = char.ToUpperInvariant(ch);
+                if (upper is (>= 'A' and <= 'Z') or (>= '0' and <= '9'))
+                {
+                    vks.Add(upper);
+                }
+                else
+                {
+                    return false; // special key — use the legacy fallback path
+                }
+            }
+        }
+
+        if (vks.Count == 0) return false;
+
+        var actions = new List<object>();
+        foreach (var m in modifiers) actions.Add(new Dictionary<string, object> { ["virtualKeyCode"] = m, ["down"] = true });
+        foreach (var vk in vks)
+        {
+            actions.Add(new Dictionary<string, object> { ["virtualKeyCode"] = vk, ["down"] = true });
+            actions.Add(new Dictionary<string, object> { ["virtualKeyCode"] = vk, ["down"] = false });
+        }
+        for (var i = modifiers.Count - 1; i >= 0; i--) actions.Add(new Dictionary<string, object> { ["virtualKeyCode"] = modifiers[i], ["down"] = false });
+
+        try
+        {
+            Session!.ExecuteScript("windows: keys", new Dictionary<string, object> { ["actions"] = actions });
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static void SendRemoteKey(string key)
@@ -1203,6 +1279,10 @@ finally
         options.PlatformName   = "Windows";
         options.DeviceName     = "WindowsPC";
         options.App            = appId;
+        // Appium's default newCommandTimeout (60 s) kills whichever session sits idle
+        // while the other is busy — the desktop session in particular can idle for
+        // minutes between file-dialog interactions. 0 disables the idle reaper.
+        options.AddAdditionalAppiumOption("appium:newCommandTimeout", 0);
         return new WindowsDriver(new Uri(DriverUrl), options, TimeSpan.FromSeconds(120));
     }
 
@@ -1213,6 +1293,7 @@ finally
         options.AutomationName = "Windows";
         options.PlatformName   = "Windows";
         options.App            = "Root";
+        options.AddAdditionalAppiumOption("appium:newCommandTimeout", 0);
         return new WindowsDriver(new Uri(DriverUrl), options, TimeSpan.FromSeconds(120));
     }
 

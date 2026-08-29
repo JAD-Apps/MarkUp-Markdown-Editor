@@ -178,10 +178,20 @@ public sealed class EditWorkflowTests : AppSession
     [TestMethod]
     public void FindReplace_ByShortcut_OpensBar()
     {
+        // Ctrl+H TOGGLES the bar, and the preceding ByMenu test may leave it open —
+        // while probing "is the bar closed?" costs a minutes-long missing-id UIA
+        // crawl. Assert via the bridge invoke counter instead: it proves the
+        // shortcut reached the find toggle regardless of prior bar state (ByMenu
+        // separately proves the toggle shows the bar).
+        var before = int.Parse(FindById("AutomationFindInvokeCount").Text);
+
         FindById("EditorTextBox").Click();
         SendCtrlShortcut('H');
-        Thread.Sleep(400);
-        Assert.IsTrue(IsDisplayed("FindTextBox"));
+        Thread.Sleep(600);
+
+        var after = int.Parse(FindById("AutomationFindInvokeCount").Text);
+        Assert.IsTrue(after > before,
+            $"Ctrl+H should invoke the Find & Replace toggle (invoke count {before} -> {after}).");
     }
 
     [TestMethod]
@@ -207,9 +217,13 @@ public sealed class EditWorkflowTests : AppSession
     [TestMethod]
     public void Paste_HtmlClipboard_InsertsMarkdownIntoEditor()
     {
-        // Arrange — put rich HTML onto the clipboard via PowerShell
+        // Arrange — put rich HTML onto the clipboard via PowerShell.
+        // -AsHtml writes real CF_HTML (with fragment markers), which is what the
+        // rich-paste pipeline detects. Without it Set-Clipboard writes plain text,
+        // and pasting plain text that merely looks like HTML must insert it
+        // literally — the previous assertions contradicted that.
         var html = "<b>Bold text</b> and <em>italic text</em>";
-        var psCmd = $"Set-Clipboard -Value '{html}'";
+        var psCmd = $"Set-Clipboard -Value '{html}' -AsHtml";
         try
         {
             var psi = new System.Diagnostics.ProcessStartInfo("powershell.exe",
@@ -241,8 +255,6 @@ public sealed class EditWorkflowTests : AppSession
 
         // Assert — editor should contain Markdown bold/italic syntax, not raw HTML
         var editorText = editor.Text;
-        // Set-Clipboard without -Html writes plain text, so the paste handler will use
-        // the plain-text path. This still exercises the async paste plumbing.
         Assert.IsTrue(
             editorText.Contains("Bold text") || editorText.Contains("bold") || editorText.Contains("italic"),
             $"Expected pasted content to appear in editor. Actual text: '{editorText}'");

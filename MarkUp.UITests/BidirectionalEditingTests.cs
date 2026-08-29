@@ -38,19 +38,12 @@ public sealed class BidirectionalEditingTests : AppSession
     public static void ClassInit(TestContext _)
     {
         if (!IsSessionAvailable) return;
-        // Cache AutomationBridgePanel while Chrome is cold (traversal cost: MenuBar ~65 nodes +
-        // CommandBar ~40 nodes, then stop). All Canvas children are then found with a fast
-        // scoped search inside the 9-node Canvas subtree.
-        _bridge = TryFindById("AutomationBridgePanel");
+        // Do NOT look up "AutomationBridgePanel": the bridge Canvas has no automation
+        // peer, so that id is absent from the UIA tree and searching for it triggers a
+        // minutes-long exhaustive FindFirst walk into the WebView2 subtree. The bridge
+        // children resolve lazily from the session root via the cached-element
+        // properties (GetCachedElementWithin bypasses container scoping).
         _editor = TryFindById("EditorTextBox");
-        if (_bridge is null) return;
-        _previewHtml        = TryFindByIdWithin(_bridge, "AutomationPreviewHtml");
-        _lastSyncSource     = TryFindByIdWithin(_bridge, "AutomationLastSyncSource");
-        _focusedPanel       = TryFindByIdWithin(_bridge, "AutomationFocusedPanel");
-        _insertTextButton   = TryFindByIdWithin(_bridge, "AutomationPreviewInsertTextButton");
-        _boldButton         = TryFindByIdWithin(_bridge, "AutomationPreviewBoldButton");
-        _focusPreviewButton = TryFindByIdWithin(_bridge, "AutomationFocusPreviewButton");
-        _focusEditorButton  = TryFindByIdWithin(_bridge, "AutomationFocusEditorButton");
     }
 
     [TestInitialize]
@@ -113,7 +106,7 @@ public sealed class BidirectionalEditingTests : AppSession
     [TestMethod]
     public void PreviewAutomationInsertText_UpdatesEditorMarkdown()
     {
-        InsertTextButton.Click();
+        InvokeBridgeButton(InsertTextButton);
         Thread.Sleep(900);
         Assert.IsTrue(Editor.Text.Contains("preview bridge text"));
         Assert.AreEqual("PreviewToEditor", LastSyncSource.Text);
@@ -122,7 +115,7 @@ public sealed class BidirectionalEditingTests : AppSession
     [TestMethod]
     public void PreviewAutomationBold_UpdatesEditorMarkdown()
     {
-        BoldButton.Click();
+        InvokeBridgeButton(BoldButton);
         Thread.Sleep(900);
         var text = Editor.Text;
         Assert.IsTrue(text.Contains("**preview bold text**") || text.Contains("__preview bold text__") || text.Contains("preview bold text"));
@@ -132,11 +125,11 @@ public sealed class BidirectionalEditingTests : AppSession
     [TestMethod]
     public void FocusButtons_UpdateFocusedPanelState()
     {
-        FocusPreviewBtn.Click();
+        InvokeBridgeButton(FocusPreviewBtn);
         Thread.Sleep(200);
         Assert.AreEqual("Preview", FocusedPanel.Text);
 
-        FocusEditorBtn.Click();
+        InvokeBridgeButton(FocusEditorBtn);
         Thread.Sleep(200);
         Assert.AreEqual("Editor", FocusedPanel.Text);
     }
@@ -144,7 +137,7 @@ public sealed class BidirectionalEditingTests : AppSession
     [TestMethod]
     public void PreviewAutomationEdit_MarksDocumentDirty()
     {
-        InsertTextButton.Click();
+        InvokeBridgeButton(InsertTextButton);
         Thread.Sleep(900);
         var title = Session!.Title;
         Assert.IsTrue(title.Contains("*") || title.Contains("•") || title.Contains("●"));
@@ -158,7 +151,7 @@ public sealed class BidirectionalEditingTests : AppSession
         Thread.Sleep(500);
         Assert.AreEqual("EditorToPreview", LastSyncSource.Text);
 
-        InsertTextButton.Click();
+        InvokeBridgeButton(InsertTextButton);
         Thread.Sleep(900);
         Assert.AreEqual("PreviewToEditor", LastSyncSource.Text);
     }
@@ -179,7 +172,7 @@ public sealed class BidirectionalEditingTests : AppSession
 
         // 2. Trigger a preview-to-editor sync via the automation button,
         //    which internally performs the focus dance.
-        InsertTextButton.Click();
+        InvokeBridgeButton(InsertTextButton);
         Thread.Sleep(900);
         Assert.IsTrue(Editor.Text.Contains("preview bridge text"), "Precondition: preview text synced to editor");
 
@@ -205,13 +198,13 @@ public sealed class BidirectionalEditingTests : AppSession
         Assert.AreEqual("EditorToPreview", LastSyncSource.Text, "Precondition: editor drove the initial sync.");
 
         // 2. Simulate a preview-to-editor selection (triggers focus dance).
-        InsertTextButton.Click();
+        InvokeBridgeButton(InsertTextButton);
         Thread.Sleep(900);
         Assert.AreEqual("PreviewToEditor", LastSyncSource.Text, "Precondition: preview drove a sync.");
 
         // 3. Return focus to editor and verify the last-sync-source can flip back
         //    to editor (proving editor changes are not swallowed by the loop).
-        FocusEditorBtn.Click();
+        InvokeBridgeButton(FocusEditorBtn);
         Thread.Sleep(200);
         Editor.SendKeys(" appended");
         Thread.Sleep(700);

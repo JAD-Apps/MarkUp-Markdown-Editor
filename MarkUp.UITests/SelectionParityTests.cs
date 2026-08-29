@@ -50,19 +50,12 @@ public sealed class SelectionParityTests : AppSession
     public static void ClassInit(TestContext _)
     {
         if (!IsSessionAvailable) return;
-        _bridge = TryFindById("AutomationBridgePanel");
+        // Do NOT look up "AutomationBridgePanel": the bridge Canvas has no automation
+        // peer, so that id is absent from the UIA tree and searching for it triggers a
+        // minutes-long exhaustive FindFirst walk into the WebView2 subtree. The bridge
+        // children resolve lazily from the session root via the cached-element
+        // properties (GetCachedElementWithin bypasses container scoping).
         _editor = TryFindById("EditorTextBox");
-        if (_bridge is null) return;
-        _selectionStart       = TryFindByIdWithin(_bridge, "AutomationEditorSelectionStart");
-        _selectionLength      = TryFindByIdWithin(_bridge, "AutomationEditorSelectionLength");
-        _previewSelectionStart = TryFindByIdWithin(_bridge, "AutomationPreviewSelectionStart");
-        _previewSelectionLength = TryFindByIdWithin(_bridge, "AutomationPreviewSelectionLength");
-        _lastSyncSource       = TryFindByIdWithin(_bridge, "AutomationLastSyncSource");
-        _selectBridgeButton   = TryFindByIdWithin(_bridge, "AutomationPreviewSelectBridgeButton");
-        _selectBoldTextButton = TryFindByIdWithin(_bridge, "AutomationPreviewSelectBoldTextButton");
-        _selectBoldPartialButton = TryFindByIdWithin(_bridge, "AutomationPreviewSelectBoldPartialButton");
-        _selectEditorBoldFullButton = TryFindByIdWithin(_bridge, "AutomationEditorSelectBoldFullButton");
-        _selectEditorBoldPartialButton = TryFindByIdWithin(_bridge, "AutomationEditorSelectBoldPartialButton");
     }
 
     [TestInitialize]
@@ -170,7 +163,7 @@ public sealed class SelectionParityTests : AppSession
     {
         PasteText("**bold**");
 
-        SelectEditorBoldFullButton.Click();
+        InvokeBridgeButton(SelectEditorBoldFullButton);
         Thread.Sleep(300);
 
         Assert.AreEqual("0", PreviewSelectionStart.Text,
@@ -184,7 +177,7 @@ public sealed class SelectionParityTests : AppSession
     {
         PasteText("**bold**");
 
-        SelectEditorBoldPartialButton.Click();
+        InvokeBridgeButton(SelectEditorBoldPartialButton);
         Thread.Sleep(300);
 
         Assert.AreEqual("0", PreviewSelectionStart.Text,
@@ -209,7 +202,7 @@ public sealed class SelectionParityTests : AppSession
             "Precondition: editor must contain 'preview bridge text'.");
 
         // Simulate the preview sending the committed visible range for "bridge".
-        SelectBridgeButton.Click();
+        InvokeBridgeButton(SelectBridgeButton);
         Thread.Sleep(500);
 
         Assert.AreEqual("8", SelectionStart.Text,
@@ -233,7 +226,7 @@ public sealed class SelectionParityTests : AppSession
             $"Precondition: editor must contain bold text, got: '{editorText}'.");
 
         // Simulate the preview sending the full visible selection for the bold content.
-        SelectBoldTextButton.Click();
+        InvokeBridgeButton(SelectBoldTextButton);
         Thread.Sleep(500);
 
         Assert.IsTrue(int.TryParse(SelectionStart.Text, out var start),
@@ -260,7 +253,7 @@ public sealed class SelectionParityTests : AppSession
     {
         PasteText("**bold**");
 
-        SelectBoldPartialButton.Click();
+        InvokeBridgeButton(SelectBoldPartialButton);
         Thread.Sleep(500);
 
         Assert.AreEqual("2", SelectionStart.Text,
@@ -284,7 +277,7 @@ public sealed class SelectionParityTests : AppSession
 
         var syncSourceBefore = LastSyncSource.Text;
 
-        SelectBridgeButton.Click();
+        InvokeBridgeButton(SelectBridgeButton);
         Thread.Sleep(500);
 
         Assert.AreEqual(syncSourceBefore, LastSyncSource.Text,

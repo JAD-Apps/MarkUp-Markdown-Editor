@@ -86,7 +86,10 @@ $remoteResult = Invoke-Command -ComputerName $ComputerName -Credential $credenti
         $_.CommandLine -match ("--port\\s+{0}\\b" -f $Port)
     })
 
-    $appiumCommand = 'npx appium server --address 0.0.0.0 --port ' + $Port + ' *> "' + $RemoteLogPath + '"'
+    # MARKUP_UITEST=1 is inherited by WinAppDriver and then by the app it launches:
+    # it disables settings persistence and the unsaved-changes close prompt so test
+    # runs are deterministic and session teardown never blocks on a dialog.
+    $appiumCommand = '$env:MARKUP_UITEST = ''1''; npx appium server --address 0.0.0.0 --port ' + $Port + ' *> "' + $RemoteLogPath + '"'
     if ($existingProcesses.Count -eq 0) {
         Start-Process -FilePath 'powershell.exe' -ArgumentList '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $appiumCommand -WindowStyle Hidden | Out-Null
         Start-Sleep -Seconds 5

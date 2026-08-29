@@ -26,10 +26,10 @@ public sealed class ViewModeTests : AppSession
     public static void ClassInit(TestContext _)
     {
         if (!IsSessionAvailable) return;
-        _bridge = TryFindById("AutomationBridgePanel");
+        // The bridge Canvas has no automation peer, so its id is absent from the UIA
+        // tree — searching for it forces an exhaustive walk into the WebView2 subtree.
+        // Bridge children resolve lazily from the session root instead.
         _editor = TryFindById("EditorTextBox");
-        if (_bridge is null) return;
-        _viewMode = TryFindByIdWithin(_bridge, "AutomationViewMode");
     }
 
     [TestInitialize]
