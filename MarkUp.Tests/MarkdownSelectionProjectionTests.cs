@@ -6,6 +6,45 @@ namespace MarkUp.Tests;
 [TestClass]
 public sealed class MarkdownSelectionProjectionTests
 {
+    // Regression: a bare '#' (or '#nospace') is not a valid ATX heading, but the
+    // paragraph fallback's filter also refused '#' lines — so Create() spun forever
+    // and froze the app's UI thread on the first caret move after typing '#'.
+    [TestMethod]
+    [Timeout(5000)]
+    public void Create_BareHash_TerminatesAndKeepsLineVisible()
+    {
+        var projection = MarkdownSelectionProjection.Create("#");
+        Assert.AreEqual("#", projection.VisibleText);
+    }
+
+    [TestMethod]
+    [Timeout(5000)]
+    public void Create_HashWithoutSpace_TerminatesAndKeepsLineVisible()
+    {
+        var projection = MarkdownSelectionProjection.Create("##nospace");
+        Assert.AreEqual("##nospace", projection.VisibleText);
+    }
+
+    [TestMethod]
+    [Timeout(5000)]
+    public void Create_BareHashBetweenParagraphs_Terminates()
+    {
+        var projection = MarkdownSelectionProjection.Create("before\n#\nafter");
+        StringAssert.Contains(projection.VisibleText, "before");
+        StringAssert.Contains(projection.VisibleText, "#");
+        StringAssert.Contains(projection.VisibleText, "after");
+    }
+
+    [TestMethod]
+    [Timeout(5000)]
+    public void MapSourceSelectionToVisible_BareHashCaret_Terminates()
+    {
+        var projection = MarkdownSelectionProjection.Create("#");
+        var (start, length) = projection.MapSourceSelectionToVisible(1, 0);
+        Assert.AreEqual(0, length);
+        Assert.IsTrue(start >= 0);
+    }
+
     [TestMethod]
     public void MapSourceSelectionToVisible_PartialBoldSelection_MapsSubInlineRange()
     {

@@ -535,6 +535,17 @@ public sealed class MarkdownSelectionProjection
                 i++;
             }
 
+            if (i == startLine)
+            {
+                // The line reached the paragraph fallback but also fails the paragraph
+                // filter — e.g. a bare '#' or '#nospace' that is not a valid ATX heading.
+                // Consume it literally so BuildDocument ALWAYS advances; without this the
+                // document loop spins forever and freezes the UI thread (the parser has
+                // the equivalent guarantee for the same input).
+                AppendInline(_lines[i], _lineStarts[i]);
+                i++;
+            }
+
             MarkVisibleBlockConsumedEnd(startLine, i - 1);
             return i;
         }
