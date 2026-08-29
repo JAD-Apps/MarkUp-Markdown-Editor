@@ -387,29 +387,61 @@ public static partial class MarkdownParser
 
         var editableAttr = editable ? " contenteditable=\"true\"" : string.Empty;
 
-        var toolbarCss = editable ? @"
-  [contenteditable]:focus {
+        var toolbarCss = editable ? $@"
+  [contenteditable]:focus {{
     outline: none;
-  }
-  ::highlight(sync-highlight) {
+  }}
+  ::highlight(sync-highlight) {{
     background-color: rgba(0, 120, 215, 0.3);
     color: inherit;
-  }" : string.Empty;
+  }}
+  #sync-caret {{
+    position: absolute;
+    width: 2px;
+    background: {linkColor};
+    pointer-events: none;
+    z-index: 1000;
+    animation: sync-caret-blink 1.06s steps(1) infinite;
+  }}
+  @keyframes sync-caret-blink {{
+    0%, 49% {{ opacity: 1; }}
+    50%, 100% {{ opacity: 0; }}
+  }}" : string.Empty;
 
         var editScript = editable ? @"
 <script>
   var _suppressNotify = false;
   var debounceTimer;
   var _selectionMessagesSuppressed = false;
+  var _cachedTextMap = null;
+  var _caretEl = null;
+  var _suppressScrollUntil = 0;
 
   function suppressSelectionMessages() {
     _selectionMessagesSuppressed = true;
+  }
+
+  function invalidateTextMap() {
+    _cachedTextMap = null;
+  }
+
+  // buildTextMap walks every text node in the document; caching it means repeated
+  // selection/caret mirroring during caret movement costs one walk per content
+  // change instead of one walk per caret move.
+  function getTextMap() {
+    if (!_cachedTextMap) _cachedTextMap = buildTextMap();
+    return _cachedTextMap;
+  }
+
+  function clearMirroredCaret() {
+    if (_caretEl) { _caretEl.remove(); _caretEl = null; }
   }
 
   function clearMirroredSelection() {
     if (typeof CSS !== 'undefined' && CSS.highlights) {
       CSS.highlights.delete('sync-highlight');
     }
+    clearMirroredCaret();
   }
 
   // Called by C# host to update content without triggering a round-trip sync.
@@ -417,7 +449,40 @@ public static partial class MarkdownParser
     _suppressNotify = true;
     var body = document.getElementById('editor-body');
     if (body) { body.innerHTML = html; }
+    invalidateTextMap();
+    clearMirroredCaret();
     setTimeout(function() { _suppressNotify = false; }, 50);
+  }
+
+  // Applies the host zoom level as CSS zoom so both panes scale together.
+  function setZoomLevel(percent) {
+    document.body.style.zoom = percent + '%';
+  }
+
+  // Scrolls the window so rect (viewport coordinates) is visible, with a margin.
+  // Programmatic scrolls are marked so the scroll listener does not echo them
+  // back to the host as user scrolls.
+  function revealRect(rect) {
+    if (!rect) return;
+    var margin = 40;
+    var vh = window.innerHeight;
+    var delta = 0;
+    if (rect.top < margin) delta = rect.top - margin;
+    else if (rect.bottom > vh - margin) delta = rect.bottom - (vh - margin);
+    if (delta !== 0) {
+      _suppressScrollUntil = Date.now() + 200;
+      window.scrollBy(0, delta);
+    }
+  }
+
+  // Called by the host when the editor scrolls: mirrors the editor's scroll
+  // ratio (0..1 of scrollable range) onto the preview document.
+  function setScrollRatio(ratio) {
+    var se = document.scrollingElement || document.documentElement;
+    var max = se.scrollHeight - se.clientHeight;
+    if (max <= 0) return;
+    _suppressScrollUntil = Date.now() + 200;
+    se.scrollTop = ratio * max;
   }
 
   function notifyChange() {
@@ -539,7 +604,7 @@ public static partial class MarkdownParser
     var body = document.getElementById('editor-body');
     if (!body) return;
 
-    var map = buildTextMap();
+    var map = getTextMap();
     if (!map) return;
 
     start = Math.max(0, Math.min(start || 0, map.fullText.length));
@@ -568,11 +633,11 @@ public static partial class MarkdownParser
     } catch (e) {}
   }
 
-  function setMirroredSelection(start, length) {
+  function setMirroredSelection(start, length, reveal) {
     clearMirroredSelection();
     if (!length || length <= 0) return;
 
-    var map = buildTextMap();
+    var map = getTextMap();
     if (!map) return;
 
     start = Math.max(0, Math.min(start, map.fullText.length));
@@ -585,8 +650,46 @@ public static partial class MarkdownParser
         range.setStart(startPos.node, startPos.offset);
         range.setEnd(endPos.node, endPos.offset);
         CSS.highlights.set('sync-highlight', new Highlight(range));
+        if (reveal) revealRect(range.getBoundingClientRect());
       } catch(e) {}
     }
+  }
+
+  // Mirrors the editor's collapsed caret into the preview as a blinking caret
+  // marker at the corresponding rendered position.
+  function setMirroredCaret(start, reveal) {
+    clearMirroredSelection();
+
+    var map = getTextMap();
+    if (!map) return;
+
+    start = Math.max(0, Math.min(start, map.fullText.length));
+    var pos = resolveStartPos(map, start);
+    if (!pos) return;
+
+    try {
+      var range = document.createRange();
+      range.setStart(pos.node, pos.offset);
+      range.collapse(true);
+      var rect = range.getClientRects()[0] || range.getBoundingClientRect();
+      if (!rect || (rect.height === 0 && rect.top === 0 && rect.left === 0)) {
+        // Zero rect (e.g. caret between blocks): fall back to the text node's element.
+        var el = pos.node.parentElement;
+        if (!el) return;
+        rect = el.getBoundingClientRect();
+      }
+      // The caret div lives inside the zoomed body, so its computed lengths are
+      // scaled by the body's CSS zoom; divide the physical viewport coordinates
+      // by the zoom factor to land on the intended spot.
+      var z = parseFloat(document.body.style.zoom) / 100 || 1;
+      _caretEl = document.createElement('div');
+      _caretEl.id = 'sync-caret';
+      _caretEl.style.top = ((rect.top + window.scrollY) / z) + 'px';
+      _caretEl.style.left = ((rect.left + window.scrollX) / z) + 'px';
+      _caretEl.style.height = ((rect.height || 18) / z) + 'px';
+      document.body.appendChild(_caretEl);
+      if (reveal) revealRect(rect);
+    } catch (e) {}
   }
 
   // Posts the current selection (or caret position) to the host as a selectionChanged message.
@@ -607,7 +710,7 @@ public static partial class MarkdownParser
   document.addEventListener('DOMContentLoaded', function() {
     var body = document.getElementById('editor-body');
     if (body) {
-      body.addEventListener('input', notifyChange);
+      body.addEventListener('input', function() { invalidateTextMap(); notifyChange(); });
       body.addEventListener('paste', function(e) { setTimeout(notifyChange, 100); });
     }
     document.addEventListener('pointerdown', function() {
@@ -620,6 +723,23 @@ public static partial class MarkdownParser
     });
     document.addEventListener('pointerup', postCommittedSelection);
     document.addEventListener('keyup', postCommittedSelection);
+
+    // Report user scrolls to the host so the editor pane can follow.
+    // Programmatic scrolls (setScrollRatio / revealRect) are suppressed via
+    // _suppressScrollUntil so host-driven scrolling does not echo back.
+    var scrollRafPending = false;
+    window.addEventListener('scroll', function() {
+      if (scrollRafPending) return;
+      scrollRafPending = true;
+      requestAnimationFrame(function() {
+        scrollRafPending = false;
+        if (Date.now() < _suppressScrollUntil) return;
+        var se = document.scrollingElement || document.documentElement;
+        var max = se.scrollHeight - se.clientHeight;
+        var ratio = max > 0 ? se.scrollTop / max : 0;
+        window.chrome.webview.postMessage(JSON.stringify({ type: 'scrollChanged', ratio: ratio }));
+      });
+    }, { passive: true });
   });
   document.addEventListener('click', function(e) {
     var link = e.target.closest('a');
@@ -766,7 +886,7 @@ public static partial class MarkdownParser
   strong {{ font-weight: 700; }}
   {toolbarCss}
   @media print {{
-    body {{ background-color: #fff !important;
+    body {{ background-color: #fff !important; }}
     #editor-body {{ padding: 0 !important; max-width: 100% !important; }}
     h1, h2, h3, h4, h5, h6 {{ color: #000 !important; }}
     h1 {{ border-bottom-color: #ccc !important; }}
@@ -775,8 +895,17 @@ public static partial class MarkdownParser
     a {{ color: #0066cc !important; text-decoration: underline !important; }}
     a::after {{ display: none !important; }}
     code {{ background: #f0f0f0 !important; color: #000 !important; }}
-    pre {{ background: #f5f5f5 !important; color: #000 !important; border-color: #ddd !important; }}
-    pre code {{ color: #000 !important; }}
+    pre {{
+      background: #f5f5f5 !important; color: #000 !important; border-color: #ddd !important;
+      overflow-x: visible !important;
+      white-space: pre-wrap !important;
+      overflow-wrap: anywhere !important;
+      word-break: break-word !important;
+    }}
+    pre code {{ color: #000 !important; white-space: pre-wrap !important; overflow-wrap: anywhere !important; }}
+    code {{ overflow-wrap: anywhere !important; }}
+    table {{ table-layout: fixed !important; width: 100% !important; }}
+    th, td {{ overflow-wrap: anywhere !important; word-break: break-word !important; }}
     blockquote {{ border-left-color: #999 !important; background: #f9f9f9 !important; color: #333 !important; }}
     th {{ background: #eee !important; color: #000 !important; }}
     td {{ background: #fff !important; color: #000 !important; border-color: #999 !important; }}
@@ -785,7 +914,12 @@ public static partial class MarkdownParser
     del {{ color: #666 !important; }}
     strong {{ color: #000 !important; }}
     em {{ color: #000 !important; }}
-    pre, blockquote, table, img {{ page-break-inside: avoid; }}
+    /* Keep small blocks intact, but let code blocks and tables break across
+       pages — page-break-inside: avoid on a block taller than one page clips
+       its overflow instead of continuing on the next page. */
+    blockquote, img {{ page-break-inside: avoid; }}
+    pre, table {{ page-break-inside: auto; }}
+    tr {{ page-break-inside: avoid; }}
     h1, h2, h3 {{ page-break-after: avoid; }}
   }}
 </style>
@@ -852,6 +986,7 @@ public static partial class MarkdownParser
     padding: 1px 4px;
     border-radius: 3px;
     font-size: 10pt;
+    overflow-wrap: anywhere;
   }}
   pre {{
     background: #f5f5f5 !important;
@@ -860,9 +995,12 @@ public static partial class MarkdownParser
     border-radius: 4px;
     border: 1px solid #ddd;
     margin-bottom: 1em;
-    page-break-inside: avoid;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    page-break-inside: auto;
   }}
-  pre code {{ background: none !important; padding: 0; color: #000 !important; }}
+  pre code {{ background: none !important; padding: 0; color: #000 !important; white-space: pre-wrap; overflow-wrap: anywhere; }}
   blockquote {{
     border-left: 3px solid #999;
     padding: 8px 16px;
@@ -873,8 +1011,9 @@ public static partial class MarkdownParser
   li {{ margin-bottom: 0.2em; color: #000 !important; }}
   .task-list {{ list-style: none; padding-left: 0; }}
   hr {{ border: none; border-top: 1px solid #ccc; margin: 1.5em 0; }}
-  table {{ border-collapse: collapse; width: 100%; margin: 1em 0; page-break-inside: avoid; }}
-  th, td {{ border: 1px solid #999; padding: 6px 10px; text-align: left; color: #000 !important; }}
+  table {{ border-collapse: collapse; width: 100%; margin: 1em 0; table-layout: fixed; page-break-inside: auto; }}
+  tr {{ page-break-inside: avoid; }}
+  th, td {{ border: 1px solid #999; padding: 6px 10px; text-align: left; color: #000 !important; overflow-wrap: anywhere; word-break: break-word; }}
   th {{ background: #eee !important; font-weight: 600; color: #000 !important; }}
   td {{ background: #fff !important; }}
   img {{ max-width: 100%; height: auto; }}
@@ -885,7 +1024,9 @@ public static partial class MarkdownParser
     body {{ padding: 0; color: #000 !important; background: #fff !important; }}
     * {{ color: #000 !important; }}
     a {{ color: #0066cc !important; }}
-    pre, blockquote, table, img {{ page-break-inside: avoid; }}
+    blockquote, img {{ page-break-inside: avoid; }}
+    pre, table {{ page-break-inside: auto; }}
+    tr {{ page-break-inside: avoid; }}
     h1, h2, h3 {{ page-break-after: avoid; }}
     code {{ background: #f0f0f0 !important; }}
     pre {{ background: #f5f5f5 !important; }}

@@ -302,6 +302,54 @@ public class MarkdownParserTests
     }
 
     [TestMethod]
+    public void ToHtml_PrintMedia_WrapsCodeBlocksAndTables()
+    {
+        // Printed pages cannot scroll: code blocks must wrap instead of clipping
+        // behind overflow-x, and tables must break words rather than overflow.
+        var result = MarkdownParser.ToHtml("Hello", darkMode: true, editable: true);
+        Assert.IsTrue(result.Contains("white-space: pre-wrap !important"));
+        Assert.IsTrue(result.Contains("overflow-x: visible !important"));
+        Assert.IsTrue(result.Contains("table-layout: fixed !important"));
+    }
+
+    [TestMethod]
+    public void ToHtmlForPrint_WrapsCodeBlocksAndTables()
+    {
+        var result = MarkdownParser.ToHtmlForPrint("Hello");
+        Assert.IsTrue(result.Contains("white-space: pre-wrap"));
+        Assert.IsTrue(result.Contains("overflow-wrap: anywhere"));
+        Assert.IsTrue(result.Contains("table-layout: fixed"));
+    }
+
+    [TestMethod]
+    public void ToHtml_PrintMediaBodyRule_IsClosed()
+    {
+        // Regression: the print body rule was previously missing its closing brace,
+        // which swallowed every subsequent print style.
+        var result = MarkdownParser.ToHtml("Hello", darkMode: true, editable: true);
+        Assert.IsTrue(result.Contains("body { background-color: #fff !important; }"));
+    }
+
+    [TestMethod]
+    public void ToHtml_Editable_ContainsPaneSyncScript()
+    {
+        var result = MarkdownParser.ToHtml("Hello", darkMode: true, editable: true);
+        Assert.IsTrue(result.Contains("function setMirroredCaret"), "Caret mirroring function must be present.");
+        Assert.IsTrue(result.Contains("function setScrollRatio"), "Host-driven scroll sync function must be present.");
+        Assert.IsTrue(result.Contains("scrollChanged"), "Preview-driven scroll messages must be posted to the host.");
+        Assert.IsTrue(result.Contains("function setZoomLevel"), "Zoom parity function must be present.");
+        Assert.IsTrue(result.Contains("sync-caret"), "Caret marker styling must be present.");
+    }
+
+    [TestMethod]
+    public void ToHtml_NotEditable_NoPaneSyncScript()
+    {
+        var result = MarkdownParser.ToHtml("Hello", darkMode: true, editable: false);
+        Assert.IsFalse(result.Contains("setMirroredCaret"));
+        Assert.IsFalse(result.Contains("setScrollRatio"));
+    }
+
+    [TestMethod]
     public void ToHtml_PrintMediaRules_ContainPrintStyles()
     {
         // Verify that the print @media block still hides any fixed-position elements.
