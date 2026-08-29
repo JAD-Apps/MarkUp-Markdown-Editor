@@ -246,7 +246,7 @@ public static class MarkdownFormatter
     /// </summary>
     private static bool TryRemoveNestedMarker(string fullText, int selectionStart, int selectionLength, string marker, out FormattingResult result)
     {
-        result = default;
+        result = null!;
 
         if (marker.Length != 1 || selectionLength < 2)
             return false;
@@ -282,7 +282,7 @@ public static class MarkdownFormatter
     /// </summary>
     private static bool TryRemoveTripleAsteriskCombination(string fullText, int selectionStart, int selectionLength, string marker, out FormattingResult result)
     {
-        result = default;
+        result = null!;
 
         if (marker != "*" || selectionStart != 0 || selectionLength < 6 || selectionLength > fullText.Length)
             return false;
