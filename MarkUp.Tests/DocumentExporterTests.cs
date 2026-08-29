@@ -145,4 +145,38 @@ public class DocumentExporterTests
         var result = DocumentExporter.ExportToHtml(null!);
         Assert.IsTrue(result.Contains("<!DOCTYPE html>"));
     }
+
+    [TestMethod]
+    public void ExportToPlainText_CodeFenceContent_PreservedVerbatim()
+    {
+        var result = DocumentExporter.ExportToPlainText("```python\ndef f(**kwargs):\n    return **kwargs\n```");
+        Assert.IsTrue(result.Contains("def f(**kwargs):"), "Emphasis markers inside code fences must not be stripped.");
+        Assert.IsFalse(result.Contains("```"));
+        Assert.IsFalse(result.Contains("python"), "The fence line including its language tag should be dropped.");
+    }
+
+    [TestMethod]
+    public void ExportToPlainText_SingleStarItalic_MarkersRemoved()
+    {
+        var result = DocumentExporter.ExportToPlainText("This is *italic* text");
+        Assert.IsFalse(result.Contains("*"));
+        Assert.IsTrue(result.Contains("italic"));
+    }
+
+    [TestMethod]
+    public void ExportToPlainText_UnderscoreEmphasis_MarkersRemoved()
+    {
+        var result = DocumentExporter.ExportToPlainText("Some _emphasis_ and __strong__ words");
+        Assert.IsFalse(result.Contains("_"));
+        Assert.IsTrue(result.Contains("emphasis"));
+        Assert.IsTrue(result.Contains("strong"));
+    }
+
+    [TestMethod]
+    public void ExportToPlainText_SnakeCaseIdentifier_Preserved()
+    {
+        var result = DocumentExporter.ExportToPlainText("Use snake_case_name here");
+        Assert.IsTrue(result.Contains("snake_case_name"),
+            "Word-internal underscores are not emphasis and must be preserved.");
+    }
 }
