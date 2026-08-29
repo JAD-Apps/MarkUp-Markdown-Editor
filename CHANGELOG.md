@@ -2,6 +2,93 @@
 
 All notable changes to MarkUp Markdown Editor will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- **Synchronized scrolling between panes**: Scrolling the source editor mirrors proportionally
+  into the preview pane and vice versa, with echo suppression so neither pane fights the other.
+  Toggleable via View ▸ Synchronized Scrolling (on by default).
+- **Caret mirroring in the preview**: The editor's caret position is now shown in the preview
+  pane as a blinking caret marker at the corresponding rendered position (selections were
+  already mirrored via CSS Custom Highlights). When the editor pane is active, the preview
+  auto-scrolls to keep the mirrored caret/selection in view.
+- **Zoom parity**: Zoom In/Out/Reset now scales the preview pane together with the editor
+  (previously only the editor font scaled). Added main-keyboard-row Ctrl+= / Ctrl+- accelerators
+  (previously numpad-only) and Ctrl+0 for Reset Zoom.
+- **Persistent settings**: Editor font family/size, zoom level, view mode, word wrap,
+  synchronized scrolling, status-bar visibility, and window size are saved to
+  `%LocalAppData%\MarkUp\settings.json` on close and restored on launch.
+- **Unsaved-changes prompt on close**: Exiting via the menu, Alt+F4, or the title-bar close
+  button now prompts to save when the document is dirty (previously only New/Open prompted).
+- **Find & Replace improvements**: Ctrl+F now opens the find bar (alongside Ctrl+H), Enter /
+  Shift+Enter find next/previous from the find box, Escape closes it, a live match count is
+  shown, and backward search wraps around like forward search.
+- **Menu state indicators**: View-mode items are now radio-checked, and Word Wrap /
+  Synchronized Scrolling / Status Bar show check marks reflecting their current state.
+- **Font Settings in the View menu**: Previously only reachable from the toolbar overflow.
+- **`.mdown` / `.mkd` file associations**: Registered in the package manifest and added to the
+  Open dialog filter (README already advertised them). `.txt` added to the Open dialog filter.
+
+### Fixed
+- **Print styles were broken for File ▸ Print and HTML export**: A missing closing brace in the
+  generated `@media print` CSS swallowed every print rule after `body`, so printed pages could
+  keep dark-mode colours. PDF export was unaffected (separate stylesheet).
+- **Code blocks and tables no longer clip when printed**: On paper there is no scrollbar, so
+  `overflow-x: auto` code blocks printed with their content cut off. Print and PDF output now
+  wraps long code lines (`white-space: pre-wrap` + `overflow-wrap: anywhere`) and lays tables
+  out with fixed column widths and in-cell word breaking. Tall code blocks and tables are also
+  allowed to continue across page boundaries instead of being clipped by
+  `page-break-inside: avoid` (rows still keep together).
+- **Plain-text export corrupted fenced code blocks**: `**` / `~~` sequences inside code fences
+  were stripped (breaking e.g. `**kwargs`); fence content is now preserved verbatim while the
+  fence lines themselves are dropped. Single-asterisk and underscore emphasis markers are now
+  stripped outside code (word-internal underscores like `snake_case` are preserved).
+- **Preview could render stale content**: An editor change arriving while a preview render was
+  already in flight was silently dropped; it is now queued and re-rendered.
+- **App froze permanently when typing a bare `#`**: `MarkdownSelectionProjection` looped
+  forever on lines starting with `#` that are not valid ATX headings (`#`, `##nospace`) —
+  the paragraph fallback refused to consume them, so the document walk never advanced and
+  the UI thread hung. The parser has long had the equivalent guard; the projection now has
+  it too, with timeout-protected regression tests. Previously latent (the projection only
+  built for non-empty selections); caret mirroring made it build on every caret move.
+- **Hard crash (0xc000027b) when preview scripting failed**: Fire-and-forget
+  `ExecuteScriptAsync` calls discarded the WinRT async operation; if one failed (e.g. during
+  WebView2 navigation or teardown) the unobserved failure crashed the entire process with a
+  stowed exception. All fire-and-forget preview scripts now run through a helper that
+  observes and swallows failures, and selection/caret mirroring waits for the initial
+  preview navigation to complete.
+- **Ctrl+H/Ctrl+F now reliably open Find & Replace with the editor focused**: The TextBox
+  consumed Ctrl+H before menu accelerators saw it; a tunneling PreviewKeyDown interceptor
+  now handles both, debounced so the double pipeline (accelerator + interceptor) toggles
+  exactly once. A MenuFlyoutItem also silently loses all its shortcuts if it declares two
+  KeyboardAccelerators, so the extra shortcuts (Ctrl+F, main-row Ctrl+=/-, Ctrl+0) are
+  registered window-level instead.
+- **Ctrl+I no longer inserts a literal tab while italicizing**: The TextBox translates
+  Ctrl+I into a TAB control character, which replaced the selection alongside the italic
+  accelerator's wrap. The same PreviewKeyDown interceptor now handles Ctrl+I, suppressing
+  the tab and applying italic exactly once.
+
+### Test infrastructure
+- **Local end-to-end mode**: `UITEST_DRIVER_URL` overrides the hard-wired remote Appium
+  endpoint (skipping the WinRM package install), enabling the UI suite to run against a locally
+  started Appium + WinAppDriver. Recipe in `MarkUp.UITests/README.md`.
+- **Deterministic app state under test**: `MARKUP_UITEST=1` (set by the Appium host
+  environment) disables settings persistence and the unsaved-changes close prompt inside the
+  app so runs cannot inherit state from earlier launches or block on teardown dialogs.
+- **Menu bar AutomationIds**: `MenuBarFile/Edit/Format/View/Help` now carry explicit
+  AutomationIds, so menu lookups resolve directly instead of falling back to by-name UIA tree
+  crawls that intermittently blocked for minutes inside the WebView2 accessibility subtree.
+- **Idle-session reaping disabled**: Both driver sessions set `newCommandTimeout: 0`; Appium's
+  60-second default killed the desktop session while the app session was busy.
+
+### Performance
+- **Eliminated a full Markdown→HTML re-parse on every keystroke and caret move**: The
+  automation-state HTML fragment is now cached per content revision.
+- **Preview text-map caching**: The DOM text-node map used for selection/caret mirroring is
+  built once per content change instead of once per caret move.
+- **Redundant preview DOM updates skipped**: Identical rendered HTML is no longer re-pushed to
+  the preview, preserving selection state and avoiding needless layout work.
+
 ## [1.7.0] - 2026-04-22
 
 ### Added

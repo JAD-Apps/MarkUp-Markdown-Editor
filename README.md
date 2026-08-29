@@ -24,21 +24,25 @@ Grab the latest portable build from [Releases](https://github.com/JAD-Apps/MarkU
 
 ## Features
 
-- **WYSIWYG Preview Editor**: Edit directly in the rendered preview pane with a built-in formatting toolbar — changes are automatically converted back to Markdown and synced to the source editor
+- **WYSIWYG Preview Editor**: Edit directly in the rendered preview pane using the formatting toolbar and shortcuts — changes are automatically converted back to Markdown and synced to the source editor
+- **Pane Parity**: Selections and the caret in the source editor are mirrored live in the preview (and back), and the two panes scroll together — synchronized scrolling can be toggled from the View menu
+- **Rich-Text Paste**: Pasting from browsers, Word, or Outlook converts the clipboard HTML to clean Markdown
 - **Clickable Links**: Ctrl+Click to follow links in the preview pane, with hover tooltips
 - **Live Preview**: Split-pane editor with real-time rendered Markdown preview
 - **Dark Mode**: Beautiful dark theme with Mica backdrop
 - **Full Markdown Support**: Headings, bold, italic, strikethrough, code blocks, tables, task lists, blockquotes, images, links, and more
 - **Formatting Toolbar**: Left-aligned quick-access toolbar buttons and keyboard shortcuts for all formatting operations
-- **Find & Replace**: Built-in find and replace with case-sensitive matching
+- **Find & Replace**: Built-in find and replace with case-sensitive matching, live match count, and wrap-around search in both directions
 ![The File menu with the Export submenu open, offering export as HTML, as plain text, and as PDF](docs/media/markup-export.png)
 
 - **Print & Export**: Clean printing with document title header and page numbers — no about:blank in footers; print to PDF, export to HTML, and export to plain text with proper font colour management
 - **Font Customization**: Configurable editor font family and size
-- **Zoom Controls**: Zoom in/out on the editor
+- **Zoom Controls**: Zoom in/out — both panes scale together
 - **View Modes**: Switch between split view, editor-only, and preview-only
 - **Word Wrap Toggle**: Enable or disable word wrapping in the editor
 - **Status Bar**: Live word count, character count, line count, cursor position, and zoom level
+- **Persistent Settings**: Font, zoom, view mode, word wrap, synchronized scrolling, status-bar visibility, and window size are remembered between sessions
+- **Unsaved-Changes Protection**: Closing the app, opening a file, or starting a new document prompts to save pending changes
 - **File Associations**: Registered as a handler for `.md`, `.markdown`, `.mdown`, `.mkd` files
 - **About Dialog**: Displays version, build date, runtime, architecture, and OS information
 - **Markdown Quick Reference**: Built-in cheat sheet accessible from the Help menu
@@ -59,7 +63,7 @@ Grab the latest portable build from [Releases](https://github.com/JAD-Apps/MarkU
 | Copy | Ctrl+C |
 | Paste | Ctrl+V |
 | Select All | Ctrl+A |
-| Find & Replace | Ctrl+H |
+| Find & Replace | Ctrl+F or Ctrl+H |
 | Bold | Ctrl+B |
 | Italic | Ctrl+I |
 | Inline Code | Ctrl+E |
@@ -67,6 +71,7 @@ Grab the latest portable build from [Releases](https://github.com/JAD-Apps/MarkU
 | Follow Link | Ctrl+Click |
 | Zoom In | Ctrl++ |
 | Zoom Out | Ctrl+- |
+| Reset Zoom | Ctrl+0 |
 
 ## License
 
