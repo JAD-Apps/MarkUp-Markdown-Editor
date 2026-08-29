@@ -23,7 +23,7 @@
 
         <!-- Title Bar / Menu Bar -->
         <MenuBar Grid.Row="0" Margin="0,0,0,0">
-            <MenuBarItem Title="File">
+            <MenuBarItem Title="File" AutomationProperties.AutomationId="MenuBarFile">
                 <MenuFlyoutItem x:Name="MenuNew" Text="New" Click="MenuNew_Click">
                     <MenuFlyoutItem.KeyboardAccelerators>
                         <KeyboardAccelerator Modifiers="Control" Key="N" />
@@ -65,7 +65,7 @@
                 </MenuFlyoutItem>
             </MenuBarItem>
 
-            <MenuBarItem Title="Edit">
+            <MenuBarItem Title="Edit" AutomationProperties.AutomationId="MenuBarEdit">
                 <!-- Undo/Redo/Cut/Copy/Paste/SelectAll have NO keyboard accelerators here.
                      The TextBox (editor) and WebView2 (preview) handle Ctrl+Z/Y/X/C/V/A
                      natively, so declaring them here would cause double-execution.
@@ -79,6 +79,9 @@
                 <MenuFlyoutSeparator />
                 <MenuFlyoutItem x:Name="MenuSelectAll" Text="Select All" Click="MenuSelectAll_Click" />
                 <MenuFlyoutSeparator />
+                <!-- Exactly ONE KeyboardAccelerator per MenuFlyoutItem: a second one breaks
+                     the item's shortcuts entirely. Extra shortcuts (Ctrl+F here) are
+                     registered window-level on the root grid in code-behind. -->
                 <MenuFlyoutItem x:Name="MenuFind" Text="Find &amp; Replace..." Click="MenuFind_Click">
                     <MenuFlyoutItem.KeyboardAccelerators>
                         <KeyboardAccelerator Modifiers="Control" Key="H" />
@@ -86,7 +89,7 @@
                 </MenuFlyoutItem>
             </MenuBarItem>
 
-            <MenuBarItem Title="Format">
+            <MenuBarItem Title="Format" AutomationProperties.AutomationId="MenuBarFormat">
                 <MenuFlyoutItem x:Name="MenuBold" Text="Bold" Click="MenuBold_Click">
                     <MenuFlyoutItem.KeyboardAccelerators>
                         <KeyboardAccelerator Modifiers="Control" Key="B" />
@@ -130,12 +133,13 @@
                 <MenuFlyoutItem x:Name="MenuInsertTable" Text="Insert Table" Click="MenuInsertTable_Click" />
             </MenuBarItem>
 
-            <MenuBarItem Title="View">
-                <MenuFlyoutItem x:Name="MenuViewEditor" Text="Editor Only" Click="MenuViewEditor_Click" />
-                <MenuFlyoutItem x:Name="MenuViewPreview" Text="Preview Only" Click="MenuViewPreview_Click" />
-                <MenuFlyoutItem x:Name="MenuViewSplit" Text="Split View" Click="MenuViewSplit_Click" />
+            <MenuBarItem Title="View" AutomationProperties.AutomationId="MenuBarView">
+                <RadioMenuFlyoutItem x:Name="MenuViewEditor" Text="Editor Only" GroupName="ViewMode" Click="MenuViewEditor_Click" />
+                <RadioMenuFlyoutItem x:Name="MenuViewPreview" Text="Preview Only" GroupName="ViewMode" Click="MenuViewPreview_Click" />
+                <RadioMenuFlyoutItem x:Name="MenuViewSplit" Text="Split View" GroupName="ViewMode" IsChecked="True" Click="MenuViewSplit_Click" />
                 <MenuFlyoutSeparator />
-                <MenuFlyoutItem x:Name="MenuToggleWordWrap" Text="Toggle Word Wrap" Click="MenuToggleWordWrap_Click" />
+                <ToggleMenuFlyoutItem x:Name="MenuToggleWordWrap" Text="Toggle Word Wrap" IsChecked="True" Click="MenuToggleWordWrap_Click" />
+                <ToggleMenuFlyoutItem x:Name="MenuToggleSyncScroll" Text="Synchronized Scrolling" IsChecked="True" Click="MenuToggleSyncScroll_Click" />
                 <MenuFlyoutSeparator />
                 <MenuFlyoutItem x:Name="MenuZoomIn" Text="Zoom In" Click="MenuZoomIn_Click">
                     <MenuFlyoutItem.KeyboardAccelerators>
@@ -149,10 +153,12 @@
                 </MenuFlyoutItem>
                 <MenuFlyoutItem x:Name="MenuZoomReset" Text="Reset Zoom" Click="MenuZoomReset_Click" />
                 <MenuFlyoutSeparator />
-                <MenuFlyoutItem x:Name="MenuToggleStatusBar" Text="Toggle Status Bar" Click="MenuToggleStatusBar_Click" />
+                <MenuFlyoutItem x:Name="MenuFontSettings" Text="Font Settings..." Click="ToolbarFontSettings_Click" />
+                <MenuFlyoutSeparator />
+                <ToggleMenuFlyoutItem x:Name="MenuToggleStatusBar" Text="Toggle Status Bar" IsChecked="True" Click="MenuToggleStatusBar_Click" />
             </MenuBarItem>
 
-            <MenuBarItem Title="Help">
+            <MenuBarItem Title="Help" AutomationProperties.AutomationId="MenuBarHelp">
                 <MenuFlyoutItem x:Name="MenuMarkdownRef" Text="Markdown Reference" Click="MenuMarkdownRef_Click" />
                 <MenuFlyoutSeparator />
                 <MenuFlyoutItem x:Name="MenuAbout" Text="About MarkUp" Click="MenuAbout_Click" />
@@ -405,6 +411,15 @@
                        Canvas.Left="6" Canvas.Top="4"
                        Width="1" Height="1" Opacity="0.01" Text="0"
                        AutomationProperties.AutomationId="AutomationPreviewSelectionLength" />
+            <!-- Diagnostic counters: how many times the find toggle ran and via which path -->
+            <TextBlock x:Name="AutomationFindInvokeCount"
+                       Canvas.Left="8" Canvas.Top="4"
+                       Width="1" Height="1" Opacity="0.01" Text="0"
+                       AutomationProperties.AutomationId="AutomationFindInvokeCount" />
+            <TextBlock x:Name="AutomationFindPreviewKeyCount"
+                       Canvas.Left="10" Canvas.Top="4"
+                       Width="1" Height="1" Opacity="0.01" Text="0"
+                       AutomationProperties.AutomationId="AutomationFindPreviewKeyCount" />
         </Canvas>
 
         <!-- Main Content: Editor + Preview -->
@@ -517,7 +532,9 @@
                 Margin="0,0,16,0" Visibility="Collapsed">
             <StackPanel Spacing="6">
                 <StackPanel Orientation="Horizontal" Spacing="4">
-                    <TextBox x:Name="FindTextBox" PlaceholderText="Find..." Width="200" Height="32" AutomationProperties.AutomationId="FindTextBox" />
+                    <TextBox x:Name="FindTextBox" PlaceholderText="Find..." Width="200" Height="32"
+                             KeyDown="FindTextBox_KeyDown" TextChanged="FindTextBox_TextChanged"
+                             AutomationProperties.AutomationId="FindTextBox" />
                     <Button x:Name="FindPrevButton" Content="▲" ToolTipService.ToolTip="Find Previous" Click="FindPrev_Click" Width="32" Height="32" Padding="0" AutomationProperties.AutomationId="FindPrevButton" />
                     <Button x:Name="FindNextButton" Content="▼" ToolTipService.ToolTip="Find Next" Click="FindNext_Click" Width="32" Height="32" Padding="0" AutomationProperties.AutomationId="FindNextButton" />
                     <Button x:Name="CloseFindButton" Content="✕" ToolTipService.ToolTip="Close" Click="CloseFindBar_Click" Width="32" Height="32" Padding="0" AutomationProperties.AutomationId="CloseFindButton" />
@@ -528,7 +545,10 @@
                     <Button x:Name="ReplaceAllButton" Content="All" ToolTipService.ToolTip="Replace All" Click="ReplaceAll_Click" Height="32" AutomationProperties.AutomationId="ReplaceAllButton" />
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" Spacing="8">
-                    <CheckBox x:Name="FindMatchCase" Content="Match case" AutomationProperties.AutomationId="FindMatchCase" />
+                    <CheckBox x:Name="FindMatchCase" Content="Match case" Click="FindMatchCase_Click" AutomationProperties.AutomationId="FindMatchCase" />
+                    <TextBlock x:Name="FindMatchCount" FontSize="12" VerticalAlignment="Center"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               AutomationProperties.AutomationId="FindMatchCount" />
                 </StackPanel>
             </StackPanel>
         </Border>

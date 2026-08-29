@@ -37,8 +37,12 @@ public sealed partial class MainWindow : Window
     private double _editorStartWidth;                                                                     
     private string _currentPreviewHtml = string.Empty;
     private string _currentPrintHtml = string.Empty;
+    private string? _automationHtmlSource;
+    private string _automationHtmlFragment = string.Empty;
     private bool _previewInitialized;
     private bool _isUpdatingPreview;
+    private bool _previewUpdatePending;
+    private string? _lastPushedPreviewFragment;
     private MarkdownSelectionProjection? _selectionProjection;
     private string _selectionProjectionText = string.Empty;
     private int _lastMirroredPreviewSelectionStart;
@@ -46,6 +50,18 @@ public sealed partial class MainWindow : Window
     private PreviewSelectionPayload? _lastCommittedPreviewSelection;
     private int _lastMirroredPreviewSelectionStartInEditor;
     private int _lastMirroredPreviewSelectionLengthInEditor;
+
+    // Scroll sync state. The editor's inner ScrollViewer is resolved from the
+    // TextBox template once it has loaded. Programmatic scrolls in either pane
+    // are echo-suppressed: JS-side via _suppressScrollUntil, host-side via
+    // _ignoreEditorScrollUntil.
+    private ScrollViewer? _editorScrollViewer;
+    private DateTime _ignoreEditorScrollUntil = DateTime.MinValue;
+    private bool _scrollScriptInFlight;
+    private double _pendingScrollRatio = -1;
+    private bool _syncScrollEnabled = true;
+    private double _baseEditorFontSize = 14;
+    private bool _closeConfirmed;
 
     // Debounce state for AutomationEditorInput — only process once content is stable for ≥2 ticks (≥300 ms)
     private string _pendingAutomationInput = string.Empty;
@@ -104,9 +120,56 @@ public sealed partial class MainWindow : Window
         _editorSyncTimer.Tick += EditorSyncTimer_Tick;
         _editorSyncTimer.Start();
 
+        // Resolve the TextBox's internal ScrollViewer once its template is realized,
+        // then mirror its scrolling into the preview pane.
+        EditorTextBox.Loaded += (_, _) => HookEditorScrollViewer();
+
+        // Ctrl+H / Ctrl+F must open Find & Replace even while the editor has focus.
+        // The TextBox consumes Ctrl+H internally (legacy control-character handling)
+        // before menu accelerators see it, so intercept on the tunneling event.
+        EditorTextBox.PreviewKeyDown += EditorTextBox_PreviewKeyDown;
+
+        // Extra shortcuts that would be SECOND accelerators on their menu items —
+        // a MenuFlyoutItem with two KeyboardAccelerators loses BOTH shortcuts, so
+        // these are registered window-level on the root grid instead:
+        //   Ctrl+F        → Find & Replace   (menu item keeps Ctrl+H)
+        //   Ctrl+= / Ctrl+- (main row)       (menu items keep numpad Add/Subtract)
+        //   Ctrl+0        → Reset Zoom       (menu item has no XAML accelerator,
+        //                                     but keep the registration style uniform)
+        AddWindowAccelerator(Windows.System.VirtualKey.F, () => MenuFind_Click(this, new RoutedEventArgs()));
+        AddWindowAccelerator((Windows.System.VirtualKey)0xBB, () => MenuZoomIn_Click(this, new RoutedEventArgs()));   // VK_OEM_PLUS
+        AddWindowAccelerator((Windows.System.VirtualKey)0xBD, () => MenuZoomOut_Click(this, new RoutedEventArgs()));  // VK_OEM_MINUS
+        AddWindowAccelerator(Windows.System.VirtualKey.Number0, () => MenuZoomReset_Click(this, new RoutedEventArgs()));
+
+        // Confirm unsaved changes on any close path (Exit menu, Alt+F4, title-bar X).
+        HookWindowClosing();
+
+        LoadSettings();
+
         // Initialize WebView2
         InitializeWebViewAsync();
         RefreshAutomationState();
+    }
+
+    /// <summary>
+    /// Registers a Ctrl+key accelerator on the window's root element. Used for
+    /// shortcuts that would otherwise be a second KeyboardAccelerator on a
+    /// MenuFlyoutItem — WinUI silently disables ALL shortcuts on an item that
+    /// declares more than one.
+    /// </summary>
+    private void AddWindowAccelerator(Windows.System.VirtualKey key, Action action)
+    {
+        var accelerator = new KeyboardAccelerator
+        {
+            Modifiers = Windows.System.VirtualKeyModifiers.Control,
+            Key = key
+        };
+        accelerator.Invoked += (_, args) =>
+        {
+            args.Handled = true;
+            action();
+        };
+        ((UIElement)Content).KeyboardAccelerators.Add(accelerator);
     }
 
     private void SetWindowIcon()
@@ -146,6 +209,17 @@ public sealed partial class MainWindow : Window
 
     private async void InitializeWebViewAsync()
     {
+        // Under UI tests, disable the Chromium renderer's accessibility tree.
+        // The test suite deliberately never drives the preview through UIA (it uses
+        // the automation bridge + ExecuteScript instead), and UIA FindFirst walks
+        // that descend into an initializing WebView2 subtree can block for minutes.
+        // The WebView2 loader reads this variable from the process environment.
+        if (IsUiTestMode)
+        {
+            Environment.SetEnvironmentVariable(
+                "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "--disable-renderer-accessibility");
+        }
+
         try
         {
             await PreviewWebView.EnsureCoreWebView2Async();
@@ -222,6 +296,16 @@ public sealed partial class MainWindow : Window
                 return;
             }
 
+            // Handle preview scroll: { "type": "scrollChanged", "ratio": 0.42 }
+            if (string.Equals(messageType, "scrollChanged", StringComparison.Ordinal))
+            {
+                if (doc.RootElement.TryGetProperty("ratio", out var ratioProp) && ratioProp.TryGetDouble(out var ratio))
+                {
+                    ApplyPreviewScrollToEditor(ratio);
+                }
+                return;
+            }
+
             // Handle final preview selection commit: { "type": "selectionChanged", "start": 0, "length": 2 }
             if (string.Equals(messageType, "selectionChanged", StringComparison.Ordinal))
             {
@@ -255,6 +339,10 @@ public sealed partial class MainWindow : Window
             // Stop the debounce timer to prevent a feedback loop:
             // preview edit -> markdown update -> timer fires -> UpdatePreview() -> overwrites preview
             _previewTimer.Stop();
+
+            // The preview DOM has diverged from the last host-pushed fragment, so the
+            // identical-fragment skip must not suppress the next editor-driven render.
+            _lastPushedPreviewFragment = null;
 
             _suppressPreviewSync = true;
             ApplyEditorDocumentUpdate(markdown, selectionStart, selectionLength, syncSource: "PreviewToEditor");
@@ -373,6 +461,25 @@ public sealed partial class MainWindow : Window
     private void UpdateTitle()
     {
         Title = _document.GetWindowTitle();
+    }
+
+    /// <summary>
+    /// Fire-and-forget preview script execution with the failure OBSERVED and swallowed.
+    /// Discarding the raw IAsyncOperation (<c>_ = ExecuteScriptAsync(...)</c>) crashes the
+    /// whole process with a stowed exception (0xc000027b) if the operation fails — which
+    /// it can whenever the WebView2 is navigating or tearing down.
+    /// </summary>
+    private async void RunPreviewScript(string script)
+    {
+        try
+        {
+            if (!_webViewReady || PreviewWebView.CoreWebView2 == null) return;
+            await PreviewWebView.CoreWebView2.ExecuteScriptAsync(script);
+        }
+        catch
+        {
+            // Preview scripting is best-effort
+        }
     }
 
     private MarkdownSelectionProjection GetSelectionProjection()
@@ -538,11 +645,302 @@ public sealed partial class MainWindow : Window
             $"if(typeof setSelectionOffsets==='function') setSelectionOffsets({selection.Start}, {selection.Length});");
     }
 
+    #region Scroll Sync
+
+    private void HookEditorScrollViewer()
+    {
+        if (_editorScrollViewer is not null) return;
+
+        _editorScrollViewer = FindDescendantScrollViewer(EditorTextBox);
+        if (_editorScrollViewer is not null)
+        {
+            _editorScrollViewer.ViewChanged += EditorScrollViewer_ViewChanged;
+        }
+    }
+
+    private static ScrollViewer? FindDescendantScrollViewer(DependencyObject root)
+    {
+        var count = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChildrenCount(root);
+        for (var i = 0; i < count; i++)
+        {
+            var child = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChild(root, i);
+            if (child is ScrollViewer viewer) return viewer;
+            var nested = FindDescendantScrollViewer(child);
+            if (nested is not null) return nested;
+        }
+
+        return null;
+    }
+
+    private void EditorScrollViewer_ViewChanged(object? sender, ScrollViewerViewChangedEventArgs e)
+    {
+        if (!_syncScrollEnabled) return;
+        if (DateTime.UtcNow < _ignoreEditorScrollUntil) return;
+        if (!_webViewReady || PreviewWebView.CoreWebView2 == null) return;
+
+        var viewer = _editorScrollViewer;
+        if (viewer is null) return;
+
+        var ratio = viewer.ScrollableHeight > 0 ? viewer.VerticalOffset / viewer.ScrollableHeight : 0;
+        _ = SendPreviewScrollRatioAsync(ratio);
+    }
+
+    /// <summary>
+    /// Pushes an editor scroll ratio to the preview, coalescing bursts: while one
+    /// script call is in flight, later ratios overwrite a single pending slot and
+    /// only the latest is sent afterwards.
+    /// </summary>
+    private async Task SendPreviewScrollRatioAsync(double ratio)
+    {
+        if (_scrollScriptInFlight)
+        {
+            _pendingScrollRatio = ratio;
+            return;
+        }
+
+        _scrollScriptInFlight = true;
+        try
+        {
+            while (true)
+            {
+                _pendingScrollRatio = -1;
+                var ratioLiteral = ratio.ToString("0.######", System.Globalization.CultureInfo.InvariantCulture);
+                await PreviewWebView.CoreWebView2.ExecuteScriptAsync(
+                    $"if(typeof setScrollRatio==='function') setScrollRatio({ratioLiteral});");
+                if (_pendingScrollRatio < 0) break;
+                ratio = _pendingScrollRatio;
+            }
+        }
+        catch
+        {
+            // Scroll mirroring is best-effort
+        }
+        finally
+        {
+            _scrollScriptInFlight = false;
+        }
+    }
+
+    /// <summary>
+    /// Applies a preview-originated scroll ratio to the editor's ScrollViewer.
+    /// The resulting ViewChanged event is suppressed for a short window so the
+    /// scroll is not echoed straight back to the preview.
+    /// </summary>
+    private void ApplyPreviewScrollToEditor(double ratio)
+    {
+        if (!_syncScrollEnabled) return;
+
+        var viewer = _editorScrollViewer;
+        if (viewer is null || viewer.ScrollableHeight <= 0) return;
+
+        _ignoreEditorScrollUntil = DateTime.UtcNow.AddMilliseconds(200);
+        viewer.ChangeView(null, Math.Clamp(ratio, 0, 1) * viewer.ScrollableHeight, null, disableAnimation: true);
+    }
+
+    private void MenuToggleSyncScroll_Click(object sender, RoutedEventArgs e)
+    {
+        _syncScrollEnabled = !_syncScrollEnabled;
+        if (sender is ToggleMenuFlyoutItem toggle)
+        {
+            toggle.IsChecked = _syncScrollEnabled;
+        }
+    }
+
+    #endregion
+
+    #region Window Close / Settings
+
+    private void HookWindowClosing()
+    {
+        try
+        {
+            var hWnd = WindowNative.GetWindowHandle(this);
+            var windowId = Win32Interop.GetWindowIdFromWindow(hWnd);
+            var appWindow = AppWindow.GetFromWindowId(windowId);
+            appWindow.Closing += OnAppWindowClosing;
+        }
+        catch
+        {
+            // If the hook fails, closing simply skips the unsaved-changes prompt
+        }
+    }
+
+    private async void OnAppWindowClosing(AppWindow sender, AppWindowClosingEventArgs args)
+    {
+        SaveSettings();
+
+        if (IsUiTestMode) return;
+        if (_closeConfirmed || !_document.IsDirty) return;
+
+        args.Cancel = true;
+
+        try
+        {
+            var save = await ShowSavePromptAsync();
+            if (save == ContentDialogResult.Primary)
+            {
+                if (await SaveDocumentAsync())
+                {
+                    _closeConfirmed = true;
+                    Close();
+                }
+            }
+            else if (save == ContentDialogResult.Secondary)
+            {
+                _closeConfirmed = true;
+                Close();
+            }
+            // Cancel: keep the window open
+        }
+        catch
+        {
+            // ShowAsync throws if another ContentDialog is already open; keep the
+            // window open rather than crash — the user can close again.
+        }
+    }
+
+    private sealed class AppSettings
+    {
+        public int ZoomPercent { get; set; } = 100;
+        public string FontFamily { get; set; } = "Cascadia Code, Consolas, Courier New";
+        public double FontSize { get; set; } = 14;
+        public string ViewMode { get; set; } = "Split";
+        public bool WordWrap { get; set; } = true;
+        public bool StatusBarVisible { get; set; } = true;
+        public bool SyncScroll { get; set; } = true;
+        public int WindowWidth { get; set; } = 1280;
+        public int WindowHeight { get; set; } = 800;
+    }
+
+    private static string GetSettingsPath()
+        => Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "MarkUp", "settings.json");
+
+    /// <summary>
+    /// UI-test runs set MARKUP_UITEST=1 in the environment that launches the app.
+    /// In that mode settings persistence is disabled (persisted view mode / zoom /
+    /// window size from earlier runs would make tests order-dependent) and the
+    /// unsaved-changes prompt on close is skipped (session teardown closes the app
+    /// with dirty content and must not block on a dialog).
+    /// </summary>
+    private static bool IsUiTestMode
+        => Environment.GetEnvironmentVariable("MARKUP_UITEST") == "1";
+
+    private void LoadSettings()
+    {
+        if (IsUiTestMode) return;
+
+        AppSettings settings;
+        try
+        {
+            var path = GetSettingsPath();
+            if (!File.Exists(path)) return;
+            settings = JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(path)) ?? new AppSettings();
+        }
+        catch
+        {
+            return; // Corrupt or unreadable settings: keep defaults
+        }
+
+        _zoomPercent = Math.Clamp(settings.ZoomPercent, 50, 200);
+        _baseEditorFontSize = Math.Clamp(settings.FontSize, 8, 72);
+        if (!string.IsNullOrWhiteSpace(settings.FontFamily))
+        {
+            EditorTextBox.FontFamily = new Microsoft.UI.Xaml.Media.FontFamily(settings.FontFamily);
+        }
+        ApplyZoom();
+
+        EditorTextBox.TextWrapping = settings.WordWrap ? TextWrapping.Wrap : TextWrapping.NoWrap;
+        StatusBar.Visibility = settings.StatusBarVisible ? Visibility.Visible : Visibility.Collapsed;
+        _syncScrollEnabled = settings.SyncScroll;
+        MenuToggleSyncScroll.IsChecked = _syncScrollEnabled;
+
+        SetViewMode(settings.ViewMode switch
+        {
+            "EditorOnly" => ViewMode.EditorOnly,
+            "PreviewOnly" => ViewMode.PreviewOnly,
+            _ => ViewMode.Split
+        });
+
+        if (settings.WindowWidth >= 640 && settings.WindowHeight >= 480)
+        {
+            SetWindowSize(settings.WindowWidth, settings.WindowHeight);
+        }
+    }
+
+    private void SaveSettings()
+    {
+        if (IsUiTestMode) return;
+
+        try
+        {
+            var hWnd = WindowNative.GetWindowHandle(this);
+            var windowId = Win32Interop.GetWindowIdFromWindow(hWnd);
+            var appWindow = AppWindow.GetFromWindowId(windowId);
+
+            var settings = new AppSettings
+            {
+                ZoomPercent = _zoomPercent,
+                FontFamily = EditorTextBox.FontFamily.Source,
+                FontSize = _baseEditorFontSize,
+                ViewMode = _viewMode.ToString(),
+                WordWrap = EditorTextBox.TextWrapping == TextWrapping.Wrap,
+                StatusBarVisible = StatusBar.Visibility == Visibility.Visible,
+                SyncScroll = _syncScrollEnabled,
+                WindowWidth = appWindow.Size.Width,
+                WindowHeight = appWindow.Size.Height
+            };
+
+            var path = GetSettingsPath();
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.WriteAllText(path, JsonSerializer.Serialize(settings));
+        }
+        catch
+        {
+            // Settings persistence is best-effort
+        }
+    }
+
+    #endregion
+
     #region Editor Events
+
+    private void EditorTextBox_PreviewKeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        AutomationFindPreviewKeyCount.Text = (int.TryParse(AutomationFindPreviewKeyCount.Text, out var n) ? n + 1 : 1).ToString();
+
+        if (e.Key is not (Windows.System.VirtualKey.H or Windows.System.VirtualKey.F or Windows.System.VirtualKey.I)) return;
+
+        var ctrlDown = Microsoft.UI.Input.InputKeyboardSource
+            .GetKeyStateForCurrentThread(Windows.System.VirtualKey.Control)
+            .HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down);
+        if (!ctrlDown) return;
+
+        // Marking the tunneling event handled suppresses both the TextBox's default
+        // control-character behavior AND the menu accelerator, so each shortcut is
+        // invoked here exactly once:
+        //   Ctrl+H → find (TextBox otherwise consumes it silently)
+        //   Ctrl+F → find
+        //   Ctrl+I → italic (TextBox otherwise inserts a literal TAB, corrupting
+        //            the selection alongside the accelerator's wrap)
+        e.Handled = true;
+        if (e.Key == Windows.System.VirtualKey.I)
+        {
+            MenuItalic_Click(this, new RoutedEventArgs());
+        }
+        else
+        {
+            MenuFind_Click(this, new RoutedEventArgs());
+        }
+    }
 
     private void EditorTextBox_GotFocus(object sender, RoutedEventArgs e)
     {
         _lastFocusedPanel = FocusedPanel.Editor;
+        // No-op when already hooked; retries in case the TextBox template was not
+        // yet realized when Loaded fired.
+        HookEditorScrollViewer();
         RefreshAutomationState();
     }
 
@@ -605,30 +1003,43 @@ public sealed partial class MainWindow : Window
     {
         if (_syncingSelectionFromPreview) return;
         if (!_webViewReady || PreviewWebView.CoreWebView2 == null) return;
+        // Until the initial NavigateToString completes there is no preview document
+        // to mirror into — scripting a page mid-navigation can fail.
+        if (!_previewInitialized) return;
+
+        // Only auto-scroll the preview to follow the mirror when the editor is the
+        // pane the user is working in; otherwise mirroring must not move the
+        // preview viewport out from under the user.
+        var reveal = _lastFocusedPanel == FocusedPanel.Editor ? "true" : "false";
+
+        var projection = GetSelectionProjection();
+
         if (EditorTextBox.SelectionLength == 0)
         {
+            // Mirror the collapsed caret as a caret marker in the preview.
+            // The automation selection fields intentionally stay 0/0 for carets.
+            var (caretStart, _) = projection.MapSourceSelectionToVisible(EditorTextBox.SelectionStart, 0);
             _lastMirroredPreviewSelectionStart = 0;
             _lastMirroredPreviewSelectionLength = 0;
             RefreshAutomationState();
-            _ = PreviewWebView.CoreWebView2.ExecuteScriptAsync("if(typeof clearMirroredSelection==='function') clearMirroredSelection();");
+            RunPreviewScript($"if(typeof setMirroredCaret==='function') setMirroredCaret({caretStart}, {reveal});");
             return;
         }
 
-        var projection = GetSelectionProjection();
         var (visibleStart, visibleLength) = projection.MapSourceSelectionToVisible(EditorTextBox.SelectionStart, EditorTextBox.SelectionLength);
         if (visibleLength <= 0)
         {
             _lastMirroredPreviewSelectionStart = 0;
             _lastMirroredPreviewSelectionLength = 0;
             RefreshAutomationState();
-            _ = PreviewWebView.CoreWebView2.ExecuteScriptAsync("if(typeof clearMirroredSelection==='function') clearMirroredSelection();");
+            RunPreviewScript("if(typeof clearMirroredSelection==='function') clearMirroredSelection();");
             return;
         }
 
         _lastMirroredPreviewSelectionStart = visibleStart;
         _lastMirroredPreviewSelectionLength = visibleLength;
         RefreshAutomationState();
-        _ = PreviewWebView.CoreWebView2.ExecuteScriptAsync($"if(typeof setMirroredSelection==='function') setMirroredSelection({visibleStart}, {visibleLength});");
+        RunPreviewScript($"if(typeof setMirroredSelection==='function') setMirroredSelection({visibleStart}, {visibleLength}, {reveal});");
     }
 
     private void PreviewTimer_Tick(object? sender, object e)
@@ -698,7 +1109,13 @@ public sealed partial class MainWindow : Window
     {
         if (!_webViewReady) return;
         if (_suppressPreviewSync) return;
-        if (_isUpdatingPreview) return;
+        if (_isUpdatingPreview)
+        {
+            // A render is already in flight; remember that newer content arrived so the
+            // in-flight update re-runs when it finishes instead of dropping this one.
+            _previewUpdatePending = true;
+            return;
+        }
         if (!forceWhenPreviewFocused && _lastFocusedPanel == FocusedPanel.Preview) return;
 
         _isUpdatingPreview = true;
@@ -721,6 +1138,14 @@ public sealed partial class MainWindow : Window
                 await tcs.Task;
                 PreviewWebView.NavigationCompleted -= OnNavCompleted;
                 _previewInitialized = true;
+                _lastPushedPreviewFragment = MarkdownParser.ToHtmlFragment(_document.Content);
+
+                // Re-apply zoom: a full navigation resets the page's CSS zoom.
+                if (_zoomPercent != 100)
+                {
+                    await PreviewWebView.CoreWebView2.ExecuteScriptAsync(
+                        $"if(typeof setZoomLevel==='function') setZoomLevel({_zoomPercent});");
+                }
 
                 if (previewSelectionToRestore is not null && _lastFocusedPanel == FocusedPanel.Preview)
                 {
@@ -735,9 +1160,16 @@ public sealed partial class MainWindow : Window
             {
                 // Incremental update: replace only body content without a page reload.
                 // Preserves JS state, scroll position, and WebView2 focus.
+                // Skip the DOM replacement entirely when the rendered HTML is unchanged —
+                // rewriting identical innerHTML still destroys the selection and any
+                // active highlight ranges in the preview.
                 var bodyHtml = MarkdownParser.ToHtmlFragment(_document.Content);
-                var escapedHtml = JsonSerializer.Serialize(bodyHtml);
-                await PreviewWebView.CoreWebView2.ExecuteScriptAsync($"updateContent({escapedHtml});");
+                if (!string.Equals(bodyHtml, _lastPushedPreviewFragment, StringComparison.Ordinal))
+                {
+                    var escapedHtml = JsonSerializer.Serialize(bodyHtml);
+                    await PreviewWebView.CoreWebView2.ExecuteScriptAsync($"updateContent({escapedHtml});");
+                    _lastPushedPreviewFragment = bodyHtml;
+                }
 
                 if (previewSelectionToRestore is not null && _lastFocusedPanel == FocusedPanel.Preview)
                 {
@@ -760,6 +1192,12 @@ public sealed partial class MainWindow : Window
         {
             RefreshAutomationState();
             _isUpdatingPreview = false;
+        }
+
+        if (_previewUpdatePending)
+        {
+            _previewUpdatePending = false;
+            await UpdatePreviewAsync(forceWhenPreviewFocused, previewSelectionToRestore);
         }
     }
 
@@ -805,8 +1243,18 @@ public sealed partial class MainWindow : Window
 
     private void RefreshAutomationState()
     {
+        // RefreshAutomationState runs on every caret move and keystroke; converting the
+        // whole document to HTML each time is the app's single largest CPU cost while
+        // typing. Cache the fragment keyed on the content string instead.
+        if (!ReferenceEquals(_automationHtmlSource, _document.Content)
+            && !string.Equals(_automationHtmlSource, _document.Content, StringComparison.Ordinal))
+        {
+            _automationHtmlSource = _document.Content;
+            _automationHtmlFragment = MarkdownParser.ToHtmlFragment(_document.Content);
+        }
+
         AutomationDocumentContent.Text = TrimAutomationText(_document.Content);
-        AutomationPreviewHtml.Text = TrimAutomationText(MarkdownParser.ToHtmlFragment(_document.Content));
+        AutomationPreviewHtml.Text = TrimAutomationText(_automationHtmlFragment);
         AutomationFocusedPanel.Text = _lastFocusedPanel.ToString();
         AutomationViewMode.Text = _viewMode.ToString();
         AutomationEditorSelectionStart.Text = EditorTextBox.SelectionStart.ToString();
@@ -868,6 +1316,9 @@ public sealed partial class MainWindow : Window
         picker.SuggestedStartLocation = PickerLocationId.DocumentsLibrary;
         picker.FileTypeFilter.Add(".md");
         picker.FileTypeFilter.Add(".markdown");
+        picker.FileTypeFilter.Add(".mdown");
+        picker.FileTypeFilter.Add(".mkd");
+        picker.FileTypeFilter.Add(".txt");
 
         InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
 
@@ -1097,7 +1548,7 @@ public sealed partial class MainWindow : Window
     private void MenuUndo_Click(object sender, RoutedEventArgs e)
     {
         if (_lastFocusedPanel == FocusedPanel.Preview)
-            _ = PreviewWebView.CoreWebView2?.ExecuteScriptAsync("document.execCommand('undo')");
+            RunPreviewScript("document.execCommand('undo')");
         else
             EditorTextBox.Undo();
     }
@@ -1105,7 +1556,7 @@ public sealed partial class MainWindow : Window
     private void MenuRedo_Click(object sender, RoutedEventArgs e)
     {
         if (_lastFocusedPanel == FocusedPanel.Preview)
-            _ = PreviewWebView.CoreWebView2?.ExecuteScriptAsync("document.execCommand('redo')");
+            RunPreviewScript("document.execCommand('redo')");
         else
             EditorTextBox.Redo();
     }
@@ -1114,7 +1565,7 @@ public sealed partial class MainWindow : Window
     {
         if (_lastFocusedPanel == FocusedPanel.Preview)
         {
-            _ = PreviewWebView.CoreWebView2?.ExecuteScriptAsync("document.execCommand('cut')");
+            RunPreviewScript("document.execCommand('cut')");
             return;
         }
 
@@ -1133,7 +1584,7 @@ public sealed partial class MainWindow : Window
     {
         if (_lastFocusedPanel == FocusedPanel.Preview)
         {
-            _ = PreviewWebView.CoreWebView2?.ExecuteScriptAsync("document.execCommand('copy')");
+            RunPreviewScript("document.execCommand('copy')");
             return;
         }
 
@@ -1176,8 +1627,7 @@ public sealed partial class MainWindow : Window
 
                 // Escape the markdown so it can be embedded in a JS string literal
                 var escaped = EscapeForJsString(markdown);
-                _ = PreviewWebView.CoreWebView2?.ExecuteScriptAsync(
-                    $"document.execCommand('insertText', false, '{escaped}')");
+                RunPreviewScript($"document.execCommand('insertText', false, '{escaped}')");
                 return;
             }
             catch
@@ -1187,7 +1637,7 @@ public sealed partial class MainWindow : Window
         }
 
         // Plain-text fallback (original behaviour)
-        _ = PreviewWebView.CoreWebView2?.ExecuteScriptAsync(
+        RunPreviewScript(
             "navigator.clipboard.readText().then(function(t){document.execCommand('insertText',false,t)}).catch(function(){document.execCommand('paste')})");
     }
 
@@ -1257,20 +1707,82 @@ public sealed partial class MainWindow : Window
     private void MenuSelectAll_Click(object sender, RoutedEventArgs e)
     {
         if (_lastFocusedPanel == FocusedPanel.Preview)
-            _ = PreviewWebView.CoreWebView2?.ExecuteScriptAsync("document.execCommand('selectAll')");
+            RunPreviewScript("document.execCommand('selectAll')");
         else
             EditorTextBox.SelectAll();
     }
 
+    private DateTime _lastFindToggle = DateTime.MinValue;
+
     private void MenuFind_Click(object sender, RoutedEventArgs e)
     {
+        AutomationFindInvokeCount.Text = (int.TryParse(AutomationFindInvokeCount.Text, out var n) ? n + 1 : 1).ToString();
+
+        // One keypress can reach this through two independent pipelines (the menu
+        // KeyboardAccelerator and the editor's PreviewKeyDown interceptor); debounce
+        // so a single Ctrl+H/Ctrl+F toggles exactly once instead of open-then-close.
+        var now = DateTime.UtcNow;
+        if ((now - _lastFindToggle).TotalMilliseconds < 250) return;
+        _lastFindToggle = now;
+
         FindReplaceBar.Visibility = FindReplaceBar.Visibility == Visibility.Visible
             ? Visibility.Collapsed
             : Visibility.Visible;
         if (FindReplaceBar.Visibility == Visibility.Visible)
         {
             FindTextBox.Focus(FocusState.Programmatic);
+            FindTextBox.SelectAll();
+            UpdateFindMatchCount();
         }
+    }
+
+    private void FindTextBox_KeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        if (e.Key == Windows.System.VirtualKey.Enter)
+        {
+            var shiftDown = Microsoft.UI.Input.InputKeyboardSource
+                .GetKeyStateForCurrentThread(Windows.System.VirtualKey.Shift)
+                .HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down);
+            FindInEditor(forward: !shiftDown);
+            e.Handled = true;
+        }
+        else if (e.Key == Windows.System.VirtualKey.Escape)
+        {
+            FindReplaceBar.Visibility = Visibility.Collapsed;
+            EditorTextBox.Focus(FocusState.Programmatic);
+            e.Handled = true;
+        }
+    }
+
+    private void FindTextBox_TextChanged(object sender, TextChangedEventArgs e)
+        => UpdateFindMatchCount();
+
+    private void FindMatchCase_Click(object sender, RoutedEventArgs e)
+        => UpdateFindMatchCount();
+
+    private void UpdateFindMatchCount()
+    {
+        var searchText = FindTextBox.Text;
+        if (string.IsNullOrEmpty(searchText))
+        {
+            FindMatchCount.Text = string.Empty;
+            return;
+        }
+
+        var comparison = FindMatchCase.IsChecked == true
+            ? StringComparison.Ordinal
+            : StringComparison.OrdinalIgnoreCase;
+
+        var text = EditorTextBox.Text;
+        var count = 0;
+        var index = 0;
+        while ((index = text.IndexOf(searchText, index, comparison)) >= 0)
+        {
+            count++;
+            index += searchText.Length;
+        }
+
+        FindMatchCount.Text = count == 1 ? "1 match" : $"{count} matches";
     }
 
     private void FindNext_Click(object sender, RoutedEventArgs e)
@@ -1306,10 +1818,11 @@ public sealed partial class MainWindow : Window
         else
         {
             startPos = EditorTextBox.SelectionStart;
-            if (startPos > 0)
-                index = text.LastIndexOf(searchText, startPos - 1, comparison);
-            else
-                index = text.LastIndexOf(searchText, text.Length - 1, comparison);
+            index = startPos > 0
+                ? text.LastIndexOf(searchText, startPos - 1, comparison)
+                : -1;
+            if (index < 0 && text.Length > 0)
+                index = text.LastIndexOf(searchText, text.Length - 1, comparison); // wrap
         }
 
         if (index >= 0)
@@ -1601,6 +2114,10 @@ public sealed partial class MainWindow : Window
                 break;
         }
 
+        MenuViewEditor.IsChecked = mode == ViewMode.EditorOnly;
+        MenuViewPreview.IsChecked = mode == ViewMode.PreviewOnly;
+        MenuViewSplit.IsChecked = mode == ViewMode.Split;
+
         RefreshAutomationState();
     }
 
@@ -1613,6 +2130,7 @@ public sealed partial class MainWindow : Window
         EditorTextBox.TextWrapping = EditorTextBox.TextWrapping == TextWrapping.Wrap
             ? TextWrapping.NoWrap
             : TextWrapping.Wrap;
+        MenuToggleWordWrap.IsChecked = EditorTextBox.TextWrapping == TextWrapping.Wrap;
     }
 
     private void MenuZoomIn_Click(object sender, RoutedEventArgs e)
@@ -1635,8 +2153,14 @@ public sealed partial class MainWindow : Window
 
     private void ApplyZoom()
     {
-        EditorTextBox.FontSize = 14 * (_zoomPercent / 100.0);
+        EditorTextBox.FontSize = _baseEditorFontSize * (_zoomPercent / 100.0);
         StatusBarZoom.Text = $"{_zoomPercent}%";
+
+        // Keep the preview pane at the same zoom level as the editor.
+        if (_webViewReady && PreviewWebView.CoreWebView2 != null)
+        {
+            RunPreviewScript($"if(typeof setZoomLevel==='function') setZoomLevel({_zoomPercent});");
+        }
     }
 
     private void MenuToggleStatusBar_Click(object sender, RoutedEventArgs e)
@@ -1644,6 +2168,7 @@ public sealed partial class MainWindow : Window
         StatusBar.Visibility = StatusBar.Visibility == Visibility.Visible
             ? Visibility.Collapsed
             : Visibility.Visible;
+        MenuToggleStatusBar.IsChecked = StatusBar.Visibility == Visibility.Visible;
         RefreshAutomationState();
     }
 
@@ -1735,7 +2260,7 @@ public sealed partial class MainWindow : Window
         var fontSizeBox = new NumberBox
         {
             Header = "Font Size",
-            Value = EditorTextBox.FontSize,
+            Value = _baseEditorFontSize,
             Minimum = 8,
             Maximum = 72,
             SpinButtonPlacementMode = NumberBoxSpinButtonPlacementMode.Inline
@@ -1783,7 +2308,8 @@ public sealed partial class MainWindow : Window
             {
                 EditorTextBox.FontFamily = new Microsoft.UI.Xaml.Media.FontFamily(fontFamily);
             }
-            EditorTextBox.FontSize = fontSizeBox.Value;
+            _baseEditorFontSize = Math.Clamp(fontSizeBox.Value, 8, 72);
+            ApplyZoom();
         }
     }
 
