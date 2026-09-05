@@ -15,8 +15,8 @@ nearly shipped — do not skip them.
       commit date (`git log -1 --format=%ad --date=short`); no lingering
       `[Unreleased]` items that shipped
 - [ ] `README.md` feature list and shortcut table match what the build actually does
-- [ ] `changelogHighlights` for `markup` updated in `app.js` of the separate
-      `jad-apps-site` repo (2 most recent released versions + any Unreleased)
+- [ ] `jad-apps-site` (Z:\Projects\JAD-Apps): `data/news.json` item added, `data/sync-state.json`
+      advanced, `data/studio-projects.ts` refreshed (`app.js` no longer exists)
 - [ ] About dialog shows the new version (auto-derived, but eyeball it)
 
 ## 2 — Automated verification
