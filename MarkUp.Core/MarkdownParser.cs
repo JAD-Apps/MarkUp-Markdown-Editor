@@ -16,17 +16,21 @@ public static partial class MarkdownParser
     /// <param name="darkMode">Whether to use dark mode styling.</param>
     /// <param name="editable">Whether to make the preview body contentEditable (WYSIWYG mode).</param>
     /// <param name="documentTitle">Optional document title for the HTML title tag (used in print headers/footers).</param>
-    public static string ToHtml(string markdown, bool darkMode = true, bool editable = false, string documentTitle = "")
+    /// <param name="baseHref">Optional base URL for resolving relative image and link paths.</param>
+    public static string ToHtml(string markdown, bool darkMode = true, bool editable = false, string documentTitle = "", string baseHref = "")
     {
         if (string.IsNullOrEmpty(markdown))
-            return BuildHtmlPage(string.Empty, darkMode, editable, documentTitle);
+            return BuildHtmlPage(string.Empty, darkMode, editable, documentTitle, baseHref);
 
         var body = ConvertBody(markdown);
-        return BuildHtmlPage(body, darkMode, editable, documentTitle);
+        return BuildHtmlPage(body, darkMode, editable, documentTitle, baseHref);
     }
 
     /// <summary>
     /// Converts markdown text to an HTML body fragment (no wrapping document).
+    /// The fragment contains no whitespace between block elements: the preview pane maps
+    /// rendered text offsets back to the Markdown source, and stray whitespace text nodes
+    /// between blocks would shift every offset after them.
     /// </summary>
     public static string ToHtmlFragment(string markdown)
     {
@@ -36,7 +40,27 @@ public static partial class MarkdownParser
         return ConvertBody(markdown);
     }
 
+    /// <summary>
+    /// Returns true for a line the renderer treats as a task-list item: <c>- [ ] text</c>,
+    /// <c>- [x] text</c> or <c>- [X] text</c>. A bullet whose text merely starts with a
+    /// bracket (e.g. <c>- [link](url)</c>) is an ordinary list item.
+    /// </summary>
+    internal static bool IsTaskListItem(string line)
+    {
+        return line.Length >= 5
+               && line[0] == '-' && line[1] == ' ' && line[2] == '['
+               && (line[3] == ' ' || line[3] == 'x' || line[3] == 'X')
+               && line[4] == ']'
+               && (line.Length == 5 || line[5] == ' ');
+    }
+
     private static string ConvertBody(string markdown)
+    {
+        var taskIndex = 0;
+        return ConvertBody(markdown, ref taskIndex);
+    }
+
+    private static string ConvertBody(string markdown, ref int taskIndex)
     {
         // Normalize line endings
         var text = markdown.Replace("\r\n", "\n").Replace("\r", "\n");
@@ -59,7 +83,7 @@ public static partial class MarkdownParser
             // Horizontal rule
             if (IsHorizontalRule(line))
             {
-                sb.AppendLine("<hr />");
+                sb.Append("<hr />");
                 i++;
                 continue;
             }
@@ -72,12 +96,12 @@ public static partial class MarkdownParser
                 var codeBlock = new StringBuilder();
                 while (i < lines.Length && !lines[i].TrimStart().StartsWith("```"))
                 {
-                    codeBlock.AppendLine(EscapeHtml(lines[i]));
+                    codeBlock.Append(EscapeHtml(lines[i])).Append('\n');
                     i++;
                 }
                 if (i < lines.Length) i++; // skip closing ```
                 var langAttr = !string.IsNullOrEmpty(lang) ? $" class=\"language-{EscapeHtml(lang)}\"" : string.Empty;
-                sb.AppendLine($"<pre><code{langAttr}>{codeBlock}</code></pre>");
+                sb.Append($"<pre><code{langAttr}>{codeBlock}</code></pre>");
                 continue;
             }
 
@@ -91,13 +115,13 @@ public static partial class MarkdownParser
                 {
                     var headingText = ProcessInline(line[(level + 1)..].Trim());
                     var id = GenerateSlug(line[(level + 1)..].Trim());
-                    sb.AppendLine($"<h{level} id=\"{id}\">{headingText}</h{level}>");
+                    sb.Append($"<h{level} id=\"{id}\">{headingText}</h{level}>");
                 }
                 else
                 {
                     // '#' without a trailing space (e.g. bare '#', '##', '#NoSpace') is not a
                     // valid ATX heading.  Emit as a paragraph so the outer loop always advances.
-                    sb.AppendLine($"<p>{ProcessInline(line)}</p>");
+                    sb.Append($"<p>{ProcessInline(line)}</p>");
                 }
                 i++;
                 continue;
@@ -114,37 +138,37 @@ public static partial class MarkdownParser
                     quoteLines.Add(ql);
                     i++;
                 }
-                var inner = ConvertBody(string.Join("\n", quoteLines));
-                sb.AppendLine($"<blockquote>{inner}</blockquote>");
+                var inner = ConvertBody(string.Join("\n", quoteLines), ref taskIndex);
+                sb.Append($"<blockquote>{inner}</blockquote>");
                 continue;
             }
 
             // Unordered list
             if (IsUnorderedListItem(line))
             {
-                sb.AppendLine("<ul>");
+                sb.Append("<ul>");
                 while (i < lines.Length && IsUnorderedListItem(lines[i]))
                 {
                     var itemText = ProcessInline(lines[i][2..].Trim());
-                    sb.AppendLine($"<li>{itemText}</li>");
+                    sb.Append($"<li>{itemText}</li>");
                     i++;
                 }
-                sb.AppendLine("</ul>");
+                sb.Append("</ul>");
                 continue;
             }
 
             // Ordered list
             if (IsOrderedListItem(line))
             {
-                sb.AppendLine("<ol>");
+                sb.Append("<ol>");
                 while (i < lines.Length && IsOrderedListItem(lines[i]))
                 {
                     var dotIndex = lines[i].IndexOf('.');
                     var itemText = ProcessInline(lines[i][(dotIndex + 1)..].Trim());
-                    sb.AppendLine($"<li>{itemText}</li>");
+                    sb.Append($"<li>{itemText}</li>");
                     i++;
                 }
-                sb.AppendLine("</ol>");
+                sb.Append("</ol>");
                 continue;
             }
 
@@ -157,46 +181,50 @@ public static partial class MarkdownParser
                 var alignments = ParseTableAlignments(separator);
                 i++; // separator row
 
-                sb.AppendLine("<table>");
-                sb.AppendLine("<thead><tr>");
+                sb.Append("<table>");
+                sb.Append("<thead><tr>");
                 for (int c = 0; c < headerCells.Length; c++)
                 {
                     var align = c < alignments.Length ? alignments[c] : string.Empty;
                     var alignAttr = !string.IsNullOrEmpty(align) ? $" style=\"text-align:{align}\"" : string.Empty;
-                    sb.AppendLine($"<th{alignAttr}>{ProcessInline(headerCells[c])}</th>");
+                    sb.Append($"<th{alignAttr}>{ProcessInline(headerCells[c])}</th>");
                 }
-                sb.AppendLine("</tr></thead>");
-                sb.AppendLine("<tbody>");
+                sb.Append("</tr></thead>");
+                sb.Append("<tbody>");
                 while (i < lines.Length && lines[i].Contains('|'))
                 {
                     var cells = ParseTableRow(lines[i]);
-                    sb.AppendLine("<tr>");
+                    sb.Append("<tr>");
                     for (int c = 0; c < cells.Length; c++)
                     {
                         var align = c < alignments.Length ? alignments[c] : string.Empty;
                         var alignAttr = !string.IsNullOrEmpty(align) ? $" style=\"text-align:{align}\"" : string.Empty;
-                        sb.AppendLine($"<td{alignAttr}>{ProcessInline(cells[c])}</td>");
+                        sb.Append($"<td{alignAttr}>{ProcessInline(cells[c])}</td>");
                     }
-                    sb.AppendLine("</tr>");
+                    sb.Append("</tr>");
                     i++;
                 }
-                sb.AppendLine("</tbody></table>");
+                sb.Append("</tbody></table>");
                 continue;
             }
 
-            // Task list (special case of unordered list)
-            if (line.StartsWith("- ["))
+            // Task list (special case of unordered list). The checkbox is a real, clickable
+            // control: the preview posts its data-task-index back to the host, which toggles
+            // the matching "[ ]"/"[x]" in the Markdown source. No whitespace precedes the item
+            // text so rendered offsets line up with the source projection.
+            if (IsTaskListItem(line))
             {
-                sb.AppendLine("<ul class=\"task-list\">");
-                while (i < lines.Length && lines[i].StartsWith("- ["))
+                sb.Append("<ul class=\"task-list\">");
+                while (i < lines.Length && IsTaskListItem(lines[i]))
                 {
-                    bool isChecked = lines[i].StartsWith("- [x]") || lines[i].StartsWith("- [X]");
+                    bool isChecked = lines[i][3] is 'x' or 'X';
                     var itemText = ProcessInline(lines[i][5..].Trim());
-                    var checkedAttr = isChecked ? " checked disabled" : " disabled";
-                    sb.AppendLine($"<li><input type=\"checkbox\"{checkedAttr} /> {itemText}</li>");
+                    var checkedAttr = isChecked ? " checked" : string.Empty;
+                    sb.Append($"<li><input type=\"checkbox\" class=\"task-checkbox\" data-task-index=\"{taskIndex}\" contenteditable=\"false\"{checkedAttr} />{itemText}</li>");
+                    taskIndex++;
                     i++;
                 }
-                sb.AppendLine("</ul>");
+                sb.Append("</ul>");
                 continue;
             }
 
@@ -208,7 +236,7 @@ public static partial class MarkdownParser
                 {
                     var headingText = ProcessInline(line.Trim());
                     var id = GenerateSlug(line.Trim());
-                    sb.AppendLine($"<h1 id=\"{id}\">{headingText}</h1>");
+                    sb.Append($"<h1 id=\"{id}\">{headingText}</h1>");
                     i += 2;
                     continue;
                 }
@@ -216,7 +244,7 @@ public static partial class MarkdownParser
                 {
                     var headingText = ProcessInline(line.Trim());
                     var id = GenerateSlug(line.Trim());
-                    sb.AppendLine($"<h2 id=\"{id}\">{headingText}</h2>");
+                    sb.Append($"<h2 id=\"{id}\">{headingText}</h2>");
                     i += 2;
                     continue;
                 }
@@ -227,7 +255,7 @@ public static partial class MarkdownParser
                 var paraLines = new List<string>();
                 while (i < lines.Length && !string.IsNullOrWhiteSpace(lines[i]) &&
                        !lines[i].StartsWith('#') && !lines[i].StartsWith('>') &&
-                       !IsUnorderedListItem(lines[i]) && !IsOrderedListItem(lines[i]) &&
+                       !IsUnorderedListItem(lines[i]) && !IsOrderedListItem(lines[i]) && !IsTaskListItem(lines[i]) &&
                        !lines[i].TrimStart().StartsWith("```") && !IsHorizontalRule(lines[i]))
                 {
                     paraLines.Add(lines[i]);
@@ -236,7 +264,7 @@ public static partial class MarkdownParser
                 var paraText = ProcessInline(string.Join("\n", paraLines));
                 // Convert single newlines within paragraph to <br />
                 paraText = paraText.Replace("\n", "<br />\n");
-                sb.AppendLine($"<p>{paraText}</p>");
+                sb.Append($"<p>{paraText}</p>");
             }
         }
 
@@ -314,7 +342,7 @@ public static partial class MarkdownParser
     private static bool IsUnorderedListItem(string line)
     {
         return (line.StartsWith("- ") || line.StartsWith("* ") || line.StartsWith("+ "))
-               && !line.StartsWith("- [");
+               && !IsTaskListItem(line);
     }
 
     private static bool IsOrderedListItem(string line)
@@ -373,7 +401,7 @@ public static partial class MarkdownParser
                    .Replace("\"", "&quot;");
     }
 
-    private static string BuildHtmlPage(string bodyHtml, bool darkMode, bool editable = false, string documentTitle = "")
+    private static string BuildHtmlPage(string bodyHtml, bool darkMode, bool editable = false, string documentTitle = "", string baseHref = "")
     {
         var bg = darkMode ? "#1e1e1e" : "#ffffff";
         var fg = darkMode ? "#d4d4d4" : "#1e1e1e";
@@ -386,6 +414,7 @@ public static partial class MarkdownParser
         var toolbarBorder = darkMode ? "#404040" : "#ccc";
 
         var editableAttr = editable ? " contenteditable=\"true\"" : string.Empty;
+        var baseTag = string.IsNullOrEmpty(baseHref) ? string.Empty : $"<base href=\"{EscapeHtml(baseHref)}\" />";
 
         var toolbarCss = editable ? $@"
   [contenteditable]:focus {{
@@ -406,7 +435,9 @@ public static partial class MarkdownParser
   @keyframes sync-caret-blink {{
     0%, 49% {{ opacity: 1; }}
     50%, 100% {{ opacity: 0; }}
-  }}" : string.Empty;
+  }}
+  .task-checkbox {{ cursor: pointer; }}" : @"
+  input[type=checkbox] { pointer-events: none; }";
 
         var editScript = editable ? @"
 <script>
@@ -415,6 +446,7 @@ public static partial class MarkdownParser
   var _selectionMessagesSuppressed = false;
   var _cachedTextMap = null;
   var _caretEl = null;
+  var _mirroredRange = null;
   var _suppressScrollUntil = 0;
 
   function suppressSelectionMessages() {
@@ -441,14 +473,42 @@ public static partial class MarkdownParser
     if (typeof CSS !== 'undefined' && CSS.highlights) {
       CSS.highlights.delete('sync-highlight');
     }
+    _mirroredRange = null;
     clearMirroredCaret();
   }
 
-  // Called by C# host to update content without triggering a round-trip sync.
+  function nodeKey(n) {
+    if (n.nodeType === 1) return n.outerHTML;
+    if (n.nodeType === 3) return '#' + n.data;
+    return '';
+  }
+
+  // Called by the C# host to update content without triggering a round-trip sync.
+  // Only the top-level blocks that actually changed are replaced: the unchanged
+  // prefix and suffix of the document keep their DOM nodes, so layout work is
+  // proportional to the edit, the scroll position holds, and selection/highlight
+  // ranges in untouched blocks survive.
   function updateContent(html) {
     _suppressNotify = true;
     var body = document.getElementById('editor-body');
-    if (body) { body.innerHTML = html; }
+    if (body) {
+      var tpl = document.createElement('template');
+      tpl.innerHTML = html;
+      var fresh = Array.prototype.slice.call(tpl.content.childNodes);
+      var old = Array.prototype.slice.call(body.childNodes);
+      var max = Math.min(old.length, fresh.length);
+      var prefix = 0;
+      while (prefix < max && nodeKey(old[prefix]) === nodeKey(fresh[prefix])) prefix++;
+      var suffix = 0;
+      while (suffix < max - prefix && nodeKey(old[old.length - 1 - suffix]) === nodeKey(fresh[fresh.length - 1 - suffix])) suffix++;
+      if (!(prefix === old.length && prefix === fresh.length)) {
+        var anchor = suffix > 0 ? old[old.length - suffix] : null;
+        for (var i = prefix; i < old.length - suffix; i++) body.removeChild(old[i]);
+        var frag = document.createDocumentFragment();
+        for (var j = prefix; j < fresh.length - suffix; j++) frag.appendChild(fresh[j]);
+        body.insertBefore(frag, anchor);
+      }
+    }
     invalidateTextMap();
     clearMirroredCaret();
     setTimeout(function() { _suppressNotify = false; }, 50);
@@ -497,27 +557,33 @@ public static partial class MarkdownParser
     }, 100);
   }
 
-  // Block-level elements whose boundaries sel.toString() represents as '\n'.
-  // We insert the same separator when building the flat text map so that
-  // indexOf(strippedEditorText) finds the correct position even when the
-  // selection spans multiple paragraphs, list items or headings.
-  var _blockTags = new Set(['P','H1','H2','H3','H4','H5','H6','LI','BLOCKQUOTE','PRE','TR','DIV']);
+  // ---- Text model -------------------------------------------------------------
+  // The host's MarkdownSelectionProjection describes the rendered document as the
+  // visible text with exactly one '\n' between consecutive blocks (paragraphs,
+  // headings, list items, table rows, quote lines). buildTextMap produces the same
+  // string from the live DOM, and every offset that crosses the host boundary is
+  // expressed in that model — never in Range.toString() coordinates, which count
+  // whitespace between block tags and omit block separators.
 
-  // Returns true when node is the first text node inside a block-level element
-  // that is a sibling or descendant of a prior block — i.e. when sel.toString()
-  // would have emitted a \n before this node's text.
-  function _needsBlockSep(node, prevNode) {
-    if (!prevNode) return false;
-    // Walk up from prevNode to find its nearest block ancestor inside editor-body.
+  var _blockTags = new Set(['P','H1','H2','H3','H4','H5','H6','LI','BLOCKQUOTE','PRE','TR','DIV']);
+  // Whitespace-only text directly inside these containers is layout noise, not content.
+  var _structuralTags = new Set(['BODY','UL','OL','TABLE','THEAD','TBODY','TR','BLOCKQUOTE']);
+
+  function blockAncestor(n) {
     var body = document.getElementById('editor-body');
-    function blockAncestor(n) {
-      while (n && n !== body) {
-        if (n.nodeType === 1 && _blockTags.has(n.tagName)) return n;
-        n = n.parentNode;
-      }
-      return null;
+    while (n && n !== body) {
+      if (n.nodeType === 1 && _blockTags.has(n.tagName)) return n;
+      n = n.parentNode;
     }
-    return blockAncestor(node) !== blockAncestor(prevNode);
+    return null;
+  }
+
+  function isIgnorableText(tn) {
+    if (tn.data.trim() !== '') return false;
+    var p = tn.parentNode;
+    if (!p) return true;
+    if (p.id === 'editor-body') return true;
+    return p.nodeType === 1 && _structuralTags.has(p.tagName);
   }
 
   function buildTextMap() {
@@ -525,38 +591,72 @@ public static partial class MarkdownParser
     if (!body) return null;
     var textNodes = [];
     var nodeOffsets = [];
+    var nodeStarts = [];
+    var nodeIndex = new Map();
     var fullText = '';
-    var prevNode = null;
+    var prevBlock = null;
+    var hasPrev = false;
     var walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT, null);
     while (walker.nextNode()) {
       var tn = walker.currentNode;
-      if (tn.textContent.trim() === '' && tn.parentNode && tn.parentNode.tagName === 'BODY') {
-        continue;
-      }
-      if (_needsBlockSep(tn, prevNode)) {
+      if (isIgnorableText(tn)) continue;
+      var block = blockAncestor(tn);
+      if (hasPrev && block !== prevBlock) {
         nodeOffsets.push({ start: fullText.length, len: 1, nodeIdx: -1 });
         fullText += '\n';
       }
-      nodeOffsets.push({ start: fullText.length, len: tn.textContent.length, nodeIdx: textNodes.length });
-      fullText += tn.textContent;
+      nodeIndex.set(tn, textNodes.length);
+      nodeStarts.push(fullText.length);
+      nodeOffsets.push({ start: fullText.length, len: tn.data.length, nodeIdx: textNodes.length });
+      fullText += tn.data;
       textNodes.push(tn);
-      prevNode = tn;
+      prevBlock = block;
+      hasPrev = true;
     }
-    return { fullText: fullText, textNodes: textNodes, nodeOffsets: nodeOffsets };
+    return { fullText: fullText, textNodes: textNodes, nodeOffsets: nodeOffsets, nodeStarts: nodeStarts, nodeIndex: nodeIndex };
   }
 
-  // Returns {start, length} visible-character offsets for the current DOM selection.
+  // Converts a DOM boundary point to an offset in the text model.
+  function domPointToOffset(map, node, offset) {
+    if (!map) return 0;
+    if (node.nodeType === 3 && map.nodeIndex.has(node)) {
+      var ni = map.nodeIndex.get(node);
+      return map.nodeStarts[ni] + Math.min(offset, node.data.length);
+    }
+    var probe = document.createRange();
+    try { probe.setStart(node, offset); probe.collapse(true); } catch (e) { return 0; }
+    // First mapped text node that starts at or after the point (document order is
+    // monotonic, so binary search).
+    var lo = 0, hi = map.textNodes.length;
+    while (lo < hi) {
+      var mid = (lo + hi) >> 1;
+      if (probe.comparePoint(map.textNodes[mid], 0) < 0) lo = mid + 1; else hi = mid;
+    }
+    if (lo > 0) {
+      var prev = map.textNodes[lo - 1];
+      var prevBlock = blockAncestor(prev);
+      // Point sits inside the same block as the previous text (e.g. end of a
+      // paragraph): report the end of that text, before the block separator.
+      if (prevBlock && prevBlock.contains(node)) return map.nodeStarts[lo - 1] + prev.data.length;
+    }
+    if (lo >= map.textNodes.length) return map.fullText.length;
+    return map.nodeStarts[lo];
+  }
+
+  // Returns {start, length} text-model offsets for the current DOM selection.
   // Collapsed carets return length:0 — the host uses these to track cursor position
   // for single-click formatting commands.
   function getSelectionOffsets(sel) {
     if (!sel || sel.rangeCount === 0) return { start: 0, length: 0 };
     var body = document.getElementById('editor-body');
     if (!body) return { start: 0, length: 0 };
+    var map = getTextMap();
+    if (!map) return { start: 0, length: 0 };
     var range = sel.getRangeAt(0);
-    var prefixRange = document.createRange();
-    prefixRange.selectNodeContents(body);
-    prefixRange.setEnd(range.startContainer, range.startOffset);
-    return { start: prefixRange.toString().length, length: range.toString().length };
+    var start = domPointToOffset(map, range.startContainer, range.startOffset);
+    var end = range.collapsed ? start : domPointToOffset(map, range.endContainer, range.endOffset);
+    if (end < start) { var t = start; start = end; end = t; }
+    return { start: start, length: end - start };
   }
 
   function resolveStartPos(map, charIdx) {
@@ -597,7 +697,7 @@ public static partial class MarkdownParser
     return null;
   }
 
-  // Restores a native DOM selection (or caret) from visible-character offsets sent by the host.
+  // Restores a native DOM selection (or caret) from text-model offsets sent by the host.
   // Called by the host after a preview re-render to place the selection where it was before
   // the re-render, making formatting feel instantaneous from the user's perspective.
   function setSelectionOffsets(start, length) {
@@ -650,6 +750,7 @@ public static partial class MarkdownParser
         range.setStart(startPos.node, startPos.offset);
         range.setEnd(endPos.node, endPos.offset);
         CSS.highlights.set('sync-highlight', new Highlight(range));
+        _mirroredRange = range;
         if (reveal) revealRect(range.getBoundingClientRect());
       } catch(e) {}
     }
@@ -692,12 +793,31 @@ public static partial class MarkdownParser
     } catch (e) {}
   }
 
+  // Test/diagnostic hooks -------------------------------------------------------
+  // Text currently covered by the mirrored editor selection highlight.
+  function getMirroredText() {
+    return _mirroredRange ? _mirroredRange.toString() : '';
+  }
+
+  // Selects the first occurrence of `text` in the rendered document as a native DOM
+  // selection and commits it to the host exactly as a user drag would.
+  function selectPreviewText(text) {
+    var map = getTextMap();
+    if (!map || !text) return false;
+    var idx = map.fullText.indexOf(text);
+    if (idx < 0) return false;
+    _selectionMessagesSuppressed = false;
+    setSelectionOffsets(idx, text.length);
+    postCommittedSelection(true);
+    return true;
+  }
+
   // Posts the current selection (or caret position) to the host as a selectionChanged message.
   // Collapsed carets are included so the host can track cursor position for single-click
   // formatting and for caret restoration after a re-render.
-  function postCommittedSelection() {
+  function postCommittedSelection(force) {
     if (_selectionMessagesSuppressed) return;
-    if (!document.hasFocus()) return;
+    if (!force && !document.hasFocus()) return;
 
     var sel = window.getSelection();
     if (!sel || sel.rangeCount === 0) return;
@@ -710,7 +830,13 @@ public static partial class MarkdownParser
   document.addEventListener('DOMContentLoaded', function() {
     var body = document.getElementById('editor-body');
     if (body) {
-      body.addEventListener('input', function() { invalidateTextMap(); notifyChange(); });
+      body.addEventListener('input', function(ev) {
+        // Checkbox toggles are mirrored to the source precisely via taskToggle; they must
+        // not push the whole document through the HTML→Markdown converter.
+        if (ev.target && ev.target.type === 'checkbox') return;
+        invalidateTextMap();
+        notifyChange();
+      });
       body.addEventListener('paste', function(e) { setTimeout(notifyChange, 100); });
     }
     document.addEventListener('pointerdown', function() {
@@ -721,8 +847,8 @@ public static partial class MarkdownParser
       _selectionMessagesSuppressed = false;
       clearMirroredSelection();
     });
-    document.addEventListener('pointerup', postCommittedSelection);
-    document.addEventListener('keyup', postCommittedSelection);
+    document.addEventListener('pointerup', function() { postCommittedSelection(false); });
+    document.addEventListener('keyup', function() { postCommittedSelection(false); });
 
     // Report user scrolls to the host so the editor pane can follow.
     // Programmatic scrolls (setScrollRatio / revealRect) are suppressed via
@@ -742,6 +868,16 @@ public static partial class MarkdownParser
     }, { passive: true });
   });
   document.addEventListener('click', function(e) {
+    var cb = e.target;
+    if (cb && cb.tagName === 'INPUT' && cb.type === 'checkbox' && cb.hasAttribute('data-task-index')) {
+      // Let the browser toggle the box, then mirror the state into the attribute (so
+      // outerHTML comparisons and HTML→Markdown conversion see it) and tell the host.
+      setTimeout(function() {
+        if (cb.checked) cb.setAttribute('checked', ''); else cb.removeAttribute('checked');
+        window.chrome.webview.postMessage(JSON.stringify({ type: 'taskToggle', index: parseInt(cb.getAttribute('data-task-index'), 10), checked: !!cb.checked }));
+      }, 0);
+      return;
+    }
     var link = e.target.closest('a');
     if (!link) return;
     var href = link.getAttribute('href');
@@ -787,6 +923,7 @@ public static partial class MarkdownParser
 <head>
 <meta charset=""utf-8"" />
 <meta name=""viewport"" content=""width=device-width, initial-scale=1"" />
+{baseTag}
 <title>{safeTitle}</title>
 <style>
   * {{ margin: 0; padding: 0; box-sizing: border-box; }}
@@ -914,6 +1051,7 @@ public static partial class MarkdownParser
     del {{ color: #666 !important; }}
     strong {{ color: #000 !important; }}
     em {{ color: #000 !important; }}
+    #sync-caret {{ display: none !important; }}
     /* Keep small blocks intact, but let code blocks and tables break across
        pages — page-break-inside: avoid on a block taller than one page clips
        its overflow instead of continuing on the next page. */
@@ -925,9 +1063,7 @@ public static partial class MarkdownParser
 </style>
 </head>
 <body>
-<div id=""editor-body""{editableAttr}>
-{bodyHtml}
-</div>
+<div id=""editor-body""{editableAttr}>{bodyHtml}</div>
 {editScript}
 </body>
 </html>";
@@ -936,22 +1072,24 @@ public static partial class MarkdownParser
     /// <summary>
     /// Builds an HTML page optimized for printing (light theme, print styles).
     /// </summary>
-    public static string ToHtmlForPrint(string markdown, string documentTitle = "")
+    public static string ToHtmlForPrint(string markdown, string documentTitle = "", string baseHref = "")
     {
         if (string.IsNullOrEmpty(markdown))
-            return BuildPrintHtmlPage(string.Empty, documentTitle);
+            return BuildPrintHtmlPage(string.Empty, documentTitle, baseHref);
 
         var body = ConvertBody(markdown);
-        return BuildPrintHtmlPage(body, documentTitle);
+        return BuildPrintHtmlPage(body, documentTitle, baseHref);
     }
 
-    private static string BuildPrintHtmlPage(string bodyHtml, string documentTitle)
+    private static string BuildPrintHtmlPage(string bodyHtml, string documentTitle, string baseHref)
     {
         var safeTitle = string.IsNullOrEmpty(documentTitle) ? "MarkUp Document" : EscapeHtml(documentTitle);
+        var baseTag = string.IsNullOrEmpty(baseHref) ? string.Empty : $"<base href=\"{EscapeHtml(baseHref)}\" />";
         return $@"<!DOCTYPE html>
 <html>
 <head>
 <meta charset=""utf-8"" />
+{baseTag}
 <title>{safeTitle}</title>
 <style>
   * {{ margin: 0; padding: 0; box-sizing: border-box; }}

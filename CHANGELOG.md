@@ -2,9 +2,29 @@
 
 All notable changes to MarkUp Markdown Editor will be documented in this file.
 
-## [Unreleased]
+## [1.8.0] - 2026-09-05
 
 ### Added
+- **List continuation on Enter**: Pressing Enter at the end of a bullet (`-`, `*`, `+`),
+  numbered (`1.` / `1)`), task (`- [ ]`) or blockquote (`>`) line starts the next line with
+  the same marker (numbers increment, nesting indentation is kept). Enter on an empty item
+  removes the marker to end the list. Shift+Enter always inserts a plain newline.
+- **Tab / Shift+Tab indent and outdent**: Tab indents the current list item or every line
+  touched by the selection by two spaces (or inserts two spaces on a plain line) instead of
+  moving keyboard focus out of the editor; Shift+Tab removes one indentation level.
+- **Clickable task checkboxes in the preview**: Ticking a checkbox in the rendered preview
+  flips the matching `[ ]` / `[x]` in the Markdown source directly, without pushing the whole
+  document through the HTML→Markdown converter.
+- **Relative images resolve against the document folder**: `![](images/a.png)` now renders
+  in the preview, print and PDF output for saved documents (the folder is served through a
+  WebView2 virtual host; untitled documents have no folder). Ctrl+Click on a relative link
+  opens the local file with its default handler.
+- **Ctrl+V converts rich text in the editor**: The keyboard shortcut now runs the same
+  HTML→Markdown paste pipeline as Edit ▸ Paste; previously only the menu command converted
+  clipboard HTML and Ctrl+V pasted the plain-text flavour.
+- **Line endings are preserved on save**: The file's line-ending style (CRLF or LF) is
+  detected on open and restored on save. The editor control stores typed newlines as a bare
+  CR, so a document edited after opening previously saved with mixed CR / CRLF breaks.
 - **Synchronized scrolling between panes**: Scrolling the source editor mirrors proportionally
   into the preview pane and vice versa, with echo suppression so neither pane fights the other.
   Toggleable via View ▸ Synchronized Scrolling (on by default).
@@ -30,6 +50,27 @@ All notable changes to MarkUp Markdown Editor will be documented in this file.
   Open dialog filter (README already advertised them). `.txt` added to the Open dialog filter.
 
 ### Fixed
+- **Undo now works across formatting commands, paste, find/replace and list edits**: Every
+  programmatic edit previously reassigned the whole editor text, which clears the TextBox undo
+  stack — Ctrl+B followed by Ctrl+Z did nothing. Edits are now applied as a minimal selection
+  replacement, so each command is a single undoable step.
+- **Preview mirroring drifted by one or more characters per block**: The preview text model
+  counted whitespace between block tags and inserted extra separators, while the source
+  projection counted exactly one newline between blocks, so highlights and the mirrored caret
+  landed progressively further off in documents with several paragraphs, lists or tables. The
+  parser now emits no inter-block whitespace, the preview script measures offsets through a
+  single text model that matches the projection, and a unit test simulates the preview model
+  against the projection for every block type. Task-list item text no longer starts with a
+  stray space either.
+- **Typed newlines were dropped by the selection projection**: The editor stores a typed Enter
+  as a bare CR, which the projection discarded, merging lines when mapping selections.
+- **A bullet whose text begins with a link (`- [text](url)`) rendered as a broken task item**:
+  Task items now require a real `[ ]` / `[x]` box.
+- **Typed keystrokes could be lost when clicking into the preview mid-debounce**: A pending
+  preview render was skipped once the preview took focus, leaving it stale; the next edit made
+  in the preview then wrote that stale content back over the editor. The pending render is now
+  flushed the moment the preview gains focus.
+- **Find match count went stale** after Replace / Replace All or while editing with the bar open.
 - **Print styles were broken for File ▸ Print and HTML export**: A missing closing brace in the
   generated `@media print` CSS swallowed every print rule after `body`, so printed pages could
   keep dark-mode colours. PDF export was unaffected (separate stylesheet).
@@ -69,6 +110,11 @@ All notable changes to MarkUp Markdown Editor will be documented in this file.
   the tab and applying italic exactly once.
 
 ### Test infrastructure
+- **Pane-parity probes** (`PaneParityTests`): the bridge can select an arbitrary editor range
+  or a text string inside the preview DOM, read back exactly what the other pane highlighted,
+  and click a task checkbox — end-to-end checks on a multi-block document.
+- **Editor behaviour suite** (`EditorBehaviourTests`): list continuation, Tab/Shift+Tab, undo
+  after formatting, and Ctrl+V rich paste driven through WinAppDriver.
 - **Local end-to-end mode**: `UITEST_DRIVER_URL` overrides the hard-wired remote Appium
   endpoint (skipping the WinRM package install), enabling the UI suite to run against a locally
   started Appium + WinAppDriver. Recipe in `MarkUp.UITests/README.md`.
@@ -82,6 +128,16 @@ All notable changes to MarkUp Markdown Editor will be documented in this file.
   60-second default killed the desktop session while the app session was busy.
 
 ### Performance
+- **Print/PDF engine is created lazily**: The hidden second WebView2 (a full Chromium renderer)
+  is no longer initialised at startup; it comes up on the first PDF export.
+- **Incremental preview DOM updates**: Re-rendering replaces only the top-level blocks whose
+  HTML changed instead of rewriting the whole body, so layout cost is proportional to the edit,
+  scroll position holds, and highlights in untouched blocks survive.
+- **Caret-move work is now logarithmic**: Source→visible offset mapping uses binary search over
+  the projection tables instead of a full scan per caret move; the projection and HTML fragment
+  caches are keyed on the document string by reference instead of copying and comparing the
+  whole editor text; the automation bridge and its 150 ms document poll only run under
+  `MARKUP_UITEST=1`.
 - **Eliminated a full Markdown→HTML re-parse on every keystroke and caret move**: The
   automation-state HTML fragment is now cached per content revision.
 - **Preview text-map caching**: The DOM text-node map used for selection/caret mirroring is

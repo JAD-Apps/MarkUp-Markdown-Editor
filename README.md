@@ -11,7 +11,7 @@
 <img src="docs/media/markup-split-view.png" alt="MarkUp in split view with the Markdown source on the left and the rendered preview on the right, showing a heading, body text and a formatted table" width="900">
 </p>
 
-**Status:** released and actively developed · **Latest:** v1.7.0 · **Requires:** Windows 10 1809 (build 17763) or later
+**Status:** released and actively developed · **Latest:** v1.8.0 · **Requires:** Windows 10 1809 (build 17763) or later
 
 A modern, dark-mode Markdown editor and viewer for Windows, built with WinUI 3 and the Windows App SDK.
 
@@ -24,9 +24,11 @@ Grab the latest portable build from [Releases](https://github.com/JAD-Apps/MarkU
 
 ## Features
 
-- **WYSIWYG Preview Editor**: Edit directly in the rendered preview pane using the formatting toolbar and shortcuts — changes are automatically converted back to Markdown and synced to the source editor
+- **WYSIWYG Preview Editor**: Edit directly in the rendered preview pane using the formatting toolbar and shortcuts — changes are automatically converted back to Markdown and synced to the source editor; tick task-list checkboxes in the preview to update the source
 - **Pane Parity**: Selections and the caret in the source editor are mirrored live in the preview (and back), and the two panes scroll together — synchronized scrolling can be toggled from the View menu
-- **Rich-Text Paste**: Pasting from browsers, Word, or Outlook converts the clipboard HTML to clean Markdown
+- **Rich-Text Paste**: Pasting from browsers, Word, or Outlook (Ctrl+V or Edit ▸ Paste) converts the clipboard HTML to clean Markdown
+- **Smart Editing Keys**: Enter continues bullet, numbered, task and quote lists; Tab / Shift+Tab indent and outdent; every formatting command is a single undo step
+- **Local Images**: Relative image paths render in the preview, print and PDF output for saved documents
 - **Clickable Links**: Ctrl+Click to follow links in the preview pane, with hover tooltips
 - **Live Preview**: Split-pane editor with real-time rendered Markdown preview
 - **Dark Mode**: Beautiful dark theme with Mica backdrop
@@ -64,6 +66,8 @@ Grab the latest portable build from [Releases](https://github.com/JAD-Apps/MarkU
 | Paste | Ctrl+V |
 | Select All | Ctrl+A |
 | Find & Replace | Ctrl+F or Ctrl+H |
+| Continue list / end list | Enter (Shift+Enter for a plain newline) |
+| Indent / Outdent | Tab / Shift+Tab |
 | Bold | Ctrl+B |
 | Italic | Ctrl+I |
 | Inline Code | Ctrl+E |

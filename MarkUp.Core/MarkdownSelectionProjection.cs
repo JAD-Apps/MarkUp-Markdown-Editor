@@ -61,20 +61,19 @@ public sealed class MarkdownSelectionProjection
             (normalizedStart, normalizedEnd) = (normalizedEnd, normalizedStart);
         }
 
-        var visibleStart = -1;
-        var visibleEnd = -1;
-        for (var i = 0; i < _visibleCharSourceStarts.Length; i++)
-        {
-            if (_visibleCharSourceEnds[i] <= normalizedStart || _visibleCharSourceStarts[i] >= normalizedEnd)
-            {
-                continue;
-            }
+        // Visible characters are emitted in source order, so their source starts are
+        // non-decreasing and both range ends can be found by binary search instead of a
+        // full scan on every caret move.
+        var visibleStart = LowerBound(_visibleCharSourceStarts, normalizedStart);
+        while (visibleStart > 0 && _visibleCharSourceEnds[visibleStart - 1] > normalizedStart)
+            visibleStart--;
+        var visibleEnd = LowerBound(_visibleCharSourceStarts, normalizedEnd);
+        while (visibleStart < visibleEnd && _visibleCharSourceEnds[visibleStart] <= normalizedStart)
+            visibleStart++;
+        while (visibleEnd > visibleStart && _visibleCharSourceEnds[visibleEnd - 1] <= normalizedStart)
+            visibleEnd--;
 
-            visibleStart = visibleStart == -1 ? i : visibleStart;
-            visibleEnd = i + 1;
-        }
-
-        if (visibleStart == -1 || visibleEnd == -1)
+        if (visibleStart >= visibleEnd)
         {
             var collapsed = GetVisibleBoundaryForNormalizedSource(normalizedStart);
             return (collapsed, 0);
@@ -125,22 +124,27 @@ public sealed class MarkdownSelectionProjection
     {
         normalizedSource = Math.Clamp(normalizedSource, 0, _normalizedMarkdown.Length);
 
-        for (var i = 0; i < _visibleCharSourceStarts.Length; i++)
+        // First visible character whose source range ends after the boundary.
+        var i = LowerBound(_visibleCharSourceStarts, normalizedSource);
+        while (i > 0 && _visibleCharSourceEnds[i - 1] > normalizedSource)
+            i--;
+        while (i < _visibleCharSourceStarts.Length && _visibleCharSourceEnds[i] <= normalizedSource)
+            i++;
+        return i;
+    }
+
+    /// <summary>Index of the first element in the sorted array that is &gt;= <paramref name="value"/>.</summary>
+    private static int LowerBound(int[] sorted, int value)
+    {
+        var lo = 0;
+        var hi = sorted.Length;
+        while (lo < hi)
         {
-            if (_visibleCharSourceEnds[i] <= normalizedSource)
-            {
-                continue;
-            }
-
-            if (_visibleCharSourceStarts[i] >= normalizedSource)
-            {
-                return i;
-            }
-
-            return i;
+            var mid = lo + ((hi - lo) >> 1);
+            if (sorted[mid] < value) lo = mid + 1;
+            else hi = mid;
         }
-
-        return _visibleCharSourceStarts.Length;
+        return lo;
     }
 
     private int GetNormalizedBoundaryForVisibleBoundary(int visibleBoundary)
@@ -171,6 +175,17 @@ public sealed class MarkdownSelectionProjection
         {
             if (text[i] == '\r')
             {
+                // "\r\n" collapses onto the following '\n'; a bare '\r' (what the WinUI
+                // TextBox stores for a typed Enter) IS the line break and must survive.
+                if (i + 1 < text.Length && text[i + 1] == '\n')
+                {
+                    originalBoundaryToNormalized[i + 1] = normalizedLength;
+                    continue;
+                }
+
+                normalized.Append('\n');
+                normalizedLength++;
+                normalizedCharOriginalEnds.Add(i + 1);
                 originalBoundaryToNormalized[i + 1] = normalizedLength;
                 continue;
             }
@@ -447,12 +462,12 @@ public sealed class MarkdownSelectionProjection
         private bool TryAppendTaskList(int lineIndex, out int nextLineIndex)
         {
             nextLineIndex = lineIndex;
-            if (!_lines[lineIndex].StartsWith("- [", StringComparison.Ordinal)) return false;
+            if (!MarkdownParser.IsTaskListItem(_lines[lineIndex])) return false;
 
             BeginVisibleBlock(lineIndex);
             var firstItem = true;
             var i = lineIndex;
-            while (i < _lines.Length && _lines[i].StartsWith("- [", StringComparison.Ordinal))
+            while (i < _lines.Length && MarkdownParser.IsTaskListItem(_lines[i]))
             {
                 if (!firstItem)
                 {
@@ -523,7 +538,7 @@ public sealed class MarkdownSelectionProjection
             var firstLine = true;
             while (i < _lines.Length && !string.IsNullOrWhiteSpace(_lines[i]) &&
                    !_lines[i].StartsWith('#') && !_lines[i].StartsWith('>') &&
-                   !IsUnorderedListItem(_lines[i]) && !IsOrderedListItem(_lines[i]) &&
+                   !IsUnorderedListItem(_lines[i]) && !IsOrderedListItem(_lines[i]) && !MarkdownParser.IsTaskListItem(_lines[i]) &&
                    !_lines[i].TrimStart().StartsWith("```", StringComparison.Ordinal) && !IsHorizontalRule(_lines[i]))
             {
                 if (!firstLine)
@@ -705,7 +720,7 @@ public sealed class MarkdownSelectionProjection
         private static bool IsUnorderedListItem(string line)
         {
             return (line.StartsWith("- ", StringComparison.Ordinal) || line.StartsWith("* ", StringComparison.Ordinal) || line.StartsWith("+ ", StringComparison.Ordinal))
-                   && !line.StartsWith("- [", StringComparison.Ordinal);
+                   && !MarkdownParser.IsTaskListItem(line);
         }
 
         private static bool IsOrderedListItem(string line)

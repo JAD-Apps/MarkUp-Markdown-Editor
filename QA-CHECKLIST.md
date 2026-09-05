@@ -43,6 +43,13 @@ nearly shipped — do not skip them.
 - [ ] Undo (Ctrl+Z) / Redo (Ctrl+Y) through a multi-edit sequence
 - [ ] Word wrap toggle works and the menu item's check mark tracks it
 - [ ] Spell-check squiggles appear on misspelled words
+- [ ] Type `- item`, Enter — next line starts with `- `; Enter on the empty item removes
+      the marker. Same for `1.` (increments), `- [ ]`, `>`. Shift+Enter gives a plain newline
+- [ ] Tab on a list line indents by two spaces and focus STAYS in the editor; Shift+Tab
+      outdents; Tab on plain text inserts two spaces
+- [ ] **[regression]** Ctrl+B on a selection, then Ctrl+Z — the bold markers come off and
+      the text remains (undo survives formatting, paste, replace and list edits)
+- [ ] Open an LF file, type a line, save — file still LF only (no bare CR); CRLF file stays CRLF
 
 ## 4 — Keyboard shortcuts (manual, editor focused)
 
@@ -82,6 +89,17 @@ nearly shipped — do not skip them.
       clean Markdown (no `<b>` tags, no `·` bullet glyphs, lists nested correctly)
 - [ ] Paste plain text that LOOKS like HTML (`<b>hi</b>`) — inserted literally,
       not converted
+- [ ] **[regression]** Ctrl+V (not just Edit ▸ Paste) with rich text on the clipboard
+      arrives as Markdown in the editor
+- [ ] Click a task checkbox in the preview — the `[ ]`/`[x]` flips in the source and the rest
+      of the document is untouched; undo reverts it
+- [ ] Open a saved document with a relative image (`![](img.png)` next to the file) — the
+      image renders in the preview and in PDF export
+- [ ] Type in the editor and click into the preview within half a second, then type in the
+      preview — the editor keeps the characters typed before the click
+- [ ] Multi-block document (heading, paragraphs, list, task list, table): select a word in
+      the LAST block in the editor — the preview highlights exactly that word, not a
+      neighbour; select it in the preview — the editor selects exactly it
 
 ## 7 — Find & Replace (manual)
 
@@ -132,8 +150,10 @@ nearly shipped — do not skip them.
 ## 11 — Store package
 
 - [ ] Build the multi-arch Release bundle per `PACKAGING.md`
-      (`AppxBundle=Always`, `x86|x64|ARM64`) — `PublishTrimmed` must remain
-      `False`; ReadyToRun is auto-disabled for bundles (NETSDK1094 guard)
+      (`-p:Platform=x64`, `UapAppxPackageBuildMode=StoreUpload`, `AppxBundle=Always`,
+      `x86|x64|ARM64`) — `PublishTrimmed` must remain `False`; ReadyToRun is
+      auto-disabled for bundles (NETSDK1094 guard). Upload the `.msixupload`, not the
+      dev-signed `_Test` bundle
 - [ ] Install the `.msixbundle` fresh on a machine (or after uninstalling the
       dev build) and smoke-test: launch, type, preview, save, print preview
 - [ ] Packaged app icon, display name, and file associations correct

@@ -23,6 +23,10 @@ http://192.168.0.100:4723
 `WinAppDriver.exe` must already be running on that remote Windows machine before the test run starts.
 The test project no longer starts a local WinAppDriver instance.
 
+> **`MARKUP_UITEST=1` is mandatory** in the environment of whichever process launches the app
+> (the Appium server, locally or remote). The app inherits it and only then enables the
+> automation bridge that every test reads; without it the bridge TextBlocks stay empty.
+
 #### Local mode (`UITEST_DRIVER_URL`)
 
 Set `UITEST_DRIVER_URL` to point the suite at any Appium endpoint — typically a locally
@@ -100,10 +104,10 @@ If the remote machine must use a different location, set `UITEST_REMOTE_APP`, `U
 
 ```powershell
 # Run all UI tests against the remote WinAppDriver host
-dotnet test MarkUp.UITests --filter "TestCategory=UITest" -- MSTest.Parallelize.Enabled=false
+dotnet test MarkUp.UITests --filter "TestCategory=UITest"
 
-# Run a specific test class
-dotnet test MarkUp.UITests --filter "TestCategory=UITest&ClassName=MarkUp.UITests.FindReplaceTests"
+# Run a specific test class (FullyQualifiedName; ClassName= does not match with this adapter)
+dotnet test MarkUp.UITests --filter "FullyQualifiedName~FindReplaceTests"
 
 # Skip UI tests and run unit tests only
 dotnet test MarkUp.Tests
@@ -128,6 +132,8 @@ dotnet test MarkUp.Tests
 | `FindReplaceTests.cs` | 20 | Open/close bar, find navigation, Replace/Replace All, match case, edge cases |
 | `StatusBarTests.cs` | 21 | Word/char/line counts, cursor position, zoom, toolbar buttons |
 | `ViewModeTests.cs` | 17 | Editor Only / Preview Only / Split cycling, zoom boundaries, splitter drag |
+| `EditorBehaviourTests.cs` | 10 | Enter list continuation, Tab/Shift+Tab, undo after formatting, Ctrl+V rich paste |
+| `PaneParityTests.cs` | 10 | Editor⇄preview selection parity on a multi-block document, task checkbox round trip |
 
 ---
 
@@ -183,6 +189,11 @@ All UI element lookup uses `AutomationProperties.AutomationId` values set in
 | `StatusBarZoom` | Zoom percentage |
 | `Toolbar` | CommandBar toolbar |
 | `ToolbarNew` … `ToolbarPrint` | Toolbar buttons |
+| `AutomationParamInput` | Bridge parameter box (not auto-applied to the editor) |
+| `AutomationEditorSelectRangeButton` | Selects `start,length` from the parameter box in the editor |
+| `AutomationPreviewSelectTextButton` | Selects the parameter text inside the preview DOM and commits it |
+| `AutomationPreviewMirroredText` | Text the preview highlighted for the last editor selection |
+| `AutomationPreviewToggleTaskButton` | Clicks the first task checkbox in the preview |
 
 ---
 

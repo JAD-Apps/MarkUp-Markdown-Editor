@@ -37,8 +37,11 @@ public sealed partial class MainWindow : Window
     private double _editorStartWidth;                                                                     
     private string _currentPreviewHtml = string.Empty;
     private string _currentPrintHtml = string.Empty;
-    private string? _automationHtmlSource;
-    private string _automationHtmlFragment = string.Empty;
+    // Rendered HTML fragment cached per content revision. Shared by the preview push and
+    // the automation bridge so the Markdown→HTML conversion runs once per edit, not once
+    // per consumer per caret move.
+    private string? _htmlFragmentSource;
+    private string _htmlFragment = string.Empty;
     private bool _previewInitialized;
     private bool _isUpdatingPreview;
     private bool _previewUpdatePending;
@@ -62,6 +65,13 @@ public sealed partial class MainWindow : Window
     private bool _syncScrollEnabled = true;
     private double _baseEditorFontSize = 14;
     private bool _closeConfirmed;
+    private bool _printWebViewInitializing;
+
+    // Relative image/link paths in the preview resolve against this virtual host, which is
+    // mapped to the folder containing the current document (see UpdateDocumentFolderMapping).
+    private const string LocalContentHost = "markup.local";
+    private const string PreviewBaseHref = "https://" + LocalContentHost + "/";
+    private string? _mappedDocumentFolder;
 
     // Debounce state for AutomationEditorInput — only process once content is stable for ≥2 ticks (≥300 ms)
     private string _pendingAutomationInput = string.Empty;
@@ -116,9 +126,15 @@ public sealed partial class MainWindow : Window
         // Periodically sync _document.Content from EditorTextBox.Text.  Required because
         // WinAppDriver's element.SendKeys uses IValueProvider.SetValue on WinUI3 TextBox,
         // which may not raise TextChanged, leaving _document.Content stale.
+        // Only needed under UI automation; in normal use TextChanged always fires and the
+        // 150 ms full-document poll would just churn allocations on large files.
         _editorSyncTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(150) };
         _editorSyncTimer.Tick += EditorSyncTimer_Tick;
-        _editorSyncTimer.Start();
+        if (IsUiTestMode) _editorSyncTimer.Start();
+
+        // Ctrl+V inside the editor: convert rich-text (CF_HTML) clipboard content to
+        // Markdown. Plain-text pastes are left to the TextBox so they stay undoable natively.
+        EditorTextBox.Paste += EditorTextBox_Paste;
 
         // Resolve the TextBox's internal ScrollViewer once its template is realized,
         // then mirror its scrolling into the preview pane.
@@ -241,12 +257,25 @@ public sealed partial class MainWindow : Window
 
             if (_initialFilePath is not null)
                 await LoadFileFromPathAsync(_initialFilePath);
+            else
+                UpdateDocumentFolderMapping();
         }
         catch
         {
             // WebView2 runtime may not be installed
         }
+    }
 
+    /// <summary>
+    /// Initialises the hidden print/PDF WebView2 on first use. Deferring it keeps a second
+    /// Chromium renderer out of the startup path for the common case of never exporting.
+    /// </summary>
+    private async Task<bool> EnsurePrintWebViewAsync()
+    {
+        if (_printWebViewReady) return true;
+        if (_printWebViewInitializing) return false;
+
+        _printWebViewInitializing = true;
         try
         {
             await PrintWebView.EnsureCoreWebView2Async();
@@ -261,10 +290,45 @@ public sealed partial class MainWindow : Window
                 var stream = new MemoryStream(System.Text.Encoding.UTF8.GetBytes(_currentPrintHtml));
                 args.Response = s.Environment.CreateWebResourceResponse(stream.AsRandomAccessStream(), 200, "OK", "Content-Type: text/html; charset=utf-8");
             };
+            UpdateDocumentFolderMapping();
+            return true;
         }
         catch
         {
-            // Print WebView2 initialization is optional
+            return false;
+        }
+        finally
+        {
+            _printWebViewInitializing = false;
+        }
+    }
+
+    /// <summary>
+    /// Points the <c>markup.local</c> virtual host at the current document's folder on both
+    /// WebViews so relative image paths (<c>![](img/a.png)</c>) render in the preview, print
+    /// and PDF output. Cleared for untitled documents.
+    /// </summary>
+    private void UpdateDocumentFolderMapping()
+    {
+        var folder = string.IsNullOrEmpty(_document.FilePath) ? null : Path.GetDirectoryName(_document.FilePath);
+        _mappedDocumentFolder = folder;
+        ApplyFolderMapping(_webViewReady ? PreviewWebView.CoreWebView2 : null, folder);
+        ApplyFolderMapping(_printWebViewReady ? PrintWebView.CoreWebView2 : null, folder);
+    }
+
+    private static void ApplyFolderMapping(CoreWebView2? core, string? folder)
+    {
+        if (core is null) return;
+        try
+        {
+            if (folder is not null && Directory.Exists(folder))
+                core.SetVirtualHostNameToFolderMapping(LocalContentHost, folder, CoreWebView2HostResourceAccessKind.Allow);
+            else
+                core.ClearVirtualHostNameToFolderMapping(LocalContentHost);
+        }
+        catch
+        {
+            // Mapping is best-effort; relative images simply won't resolve
         }
     }
 
@@ -286,11 +350,23 @@ public sealed partial class MainWindow : Window
                 if (doc.RootElement.TryGetProperty("url", out var urlProp))
                 {
                     var url = urlProp.GetString();
-                    if (!string.IsNullOrWhiteSpace(url)
-                        && Uri.TryCreate(url, UriKind.Absolute, out var uri)
-                        && (uri.Scheme == "http" || uri.Scheme == "https"))
+                    if (!string.IsNullOrWhiteSpace(url) && Uri.TryCreate(url, UriKind.Absolute, out var uri))
+                        await OpenLinkAsync(uri);
+                }
+                return;
+            }
+
+            // Handle task checkbox click: { "type": "taskToggle", "index": 0, "checked": true }
+            if (string.Equals(messageType, "taskToggle", StringComparison.Ordinal))
+            {
+                if (doc.RootElement.TryGetProperty("index", out var indexProp) && indexProp.TryGetInt32(out var taskIndex))
+                {
+                    var toggled = MarkdownEditing.ToggleTaskItem(_document.Content, taskIndex);
+                    if (toggled is not null)
                     {
-                        _ = Windows.System.Launcher.LaunchUriAsync(uri);
+                        // The preview DOM already shows the new state; only the source changes.
+                        ApplyEditorDocumentUpdate(toggled.NewText, EditorTextBox.SelectionStart, EditorTextBox.SelectionLength, syncSource: "PreviewToEditor");
+                        _lastPushedPreviewFragment = GetHtmlFragment();
                     }
                 }
                 return;
@@ -355,6 +431,36 @@ public sealed partial class MainWindow : Window
         catch
         {
             // Ignore parsing errors from WYSIWYG sync
+        }
+    }
+
+    /// <summary>
+    /// Opens a link activated with Ctrl+Click in the preview. Web links go to the default
+    /// browser; links that resolved against the document folder (relative paths under the
+    /// <c>markup.local</c> virtual host) open the local file with its default handler.
+    /// </summary>
+    private async Task OpenLinkAsync(Uri uri)
+    {
+        try
+        {
+            if (string.Equals(uri.Host, LocalContentHost, StringComparison.OrdinalIgnoreCase))
+            {
+                if (_mappedDocumentFolder is null) return;
+                var relative = Uri.UnescapeDataString(uri.AbsolutePath.TrimStart('/')).Replace('/', Path.DirectorySeparatorChar);
+                var fullPath = Path.GetFullPath(Path.Combine(_mappedDocumentFolder, relative));
+                if (!fullPath.StartsWith(Path.GetFullPath(_mappedDocumentFolder), StringComparison.OrdinalIgnoreCase)) return;
+                if (!File.Exists(fullPath)) return;
+                var file = await StorageFile.GetFileFromPathAsync(fullPath);
+                await Windows.System.Launcher.LaunchFileAsync(file);
+                return;
+            }
+
+            if (uri.Scheme == "http" || uri.Scheme == "https")
+                await Windows.System.Launcher.LaunchUriAsync(uri);
+        }
+        catch
+        {
+            // Opening links is best-effort
         }
     }
 
@@ -484,14 +590,33 @@ public sealed partial class MainWindow : Window
 
     private MarkdownSelectionProjection GetSelectionProjection()
     {
-        var editorText = EditorTextBox.Text;
-        if (_selectionProjection is null || !string.Equals(_selectionProjectionText, editorText, StringComparison.Ordinal))
+        // _document.Content mirrors EditorTextBox.Text at all times and is the same string
+        // instance between edits, so this is a reference check rather than a full copy +
+        // compare of the document on every caret move.
+        var editorText = _document.Content;
+        if (_selectionProjection is null
+            || (!ReferenceEquals(_selectionProjectionText, editorText)
+                && !string.Equals(_selectionProjectionText, editorText, StringComparison.Ordinal)))
         {
             _selectionProjection = MarkdownSelectionProjection.Create(editorText);
             _selectionProjectionText = editorText;
         }
 
         return _selectionProjection;
+    }
+
+    /// <summary>Markdown→HTML fragment for the current document, cached per content revision.</summary>
+    private string GetHtmlFragment()
+    {
+        var content = _document.Content;
+        if (!ReferenceEquals(_htmlFragmentSource, content)
+            && !string.Equals(_htmlFragmentSource, content, StringComparison.Ordinal))
+        {
+            _htmlFragmentSource = content;
+            _htmlFragment = MarkdownParser.ToHtmlFragment(content);
+        }
+
+        return _htmlFragment;
     }
 
     /// <summary>
@@ -554,15 +679,35 @@ public sealed partial class MainWindow : Window
     /// the selection-changed handler does not clear the preview selection cache, invalidates
     /// the projection, and refreshes the title and status bar.
     /// </summary>
-    private void ApplyEditorDocumentUpdate(string newText, int selectionStart, int selectionLength, string? syncSource = null, bool selectionFromPreview = false)
+    /// <param name="resetUndoHistory">
+    /// When true the whole text is reassigned (which clears the TextBox undo stack) — used
+    /// when a different document is loaded. Otherwise only the changed span is replaced
+    /// through the selection, so the operation lands on the undo stack like typing would.
+    /// </param>
+    private void ApplyEditorDocumentUpdate(string newText, int selectionStart, int selectionLength, string? syncSource = null, bool selectionFromPreview = false, bool resetUndoHistory = false)
     {
         _suppressTextChanged = true;
         if (selectionFromPreview)
             _syncingSelectionFromPreview = true;
 
-        EditorTextBox.Text = newText;
-        EditorTextBox.SelectionStart = Math.Clamp(selectionStart, 0, EditorTextBox.Text.Length);
-        EditorTextBox.SelectionLength = Math.Clamp(selectionLength, 0, EditorTextBox.Text.Length - EditorTextBox.SelectionStart);
+        if (resetUndoHistory)
+        {
+            EditorTextBox.Text = newText;
+        }
+        else
+        {
+            var currentText = EditorTextBox.Text;
+            var edit = TextEdit.Compute(currentText, MatchLineBreakConvention(currentText, newText));
+            if (!edit.IsEmpty)
+            {
+                EditorTextBox.Select(edit.Start, edit.RemovedLength);
+                EditorTextBox.SelectedText = edit.InsertedText;
+            }
+        }
+
+        var textLength = EditorTextBox.Text.Length;
+        EditorTextBox.SelectionStart = Math.Clamp(selectionStart, 0, textLength);
+        EditorTextBox.SelectionLength = Math.Clamp(selectionLength, 0, textLength - EditorTextBox.SelectionStart);
 
         if (selectionFromPreview)
             _syncingSelectionFromPreview = false;
@@ -577,6 +722,19 @@ public sealed partial class MainWindow : Window
 
         UpdateTitle();
         UpdateStatusBar();
+    }
+
+    /// <summary>
+    /// The TextBox stores typed newlines as a bare '\r' while formatter and converter output
+    /// uses '\n'. When the control's text is CR-only, rewrite '\n' to '\r' in the candidate
+    /// (same length, so caller-computed offsets stay valid) so the minimal edit covers only
+    /// the real change instead of every line break in the document.
+    /// </summary>
+    private static string MatchLineBreakConvention(string current, string candidate)
+    {
+        if (candidate.IndexOf('\n') < 0 || candidate.Contains("\r\n", StringComparison.Ordinal)) return candidate;
+        if (current.IndexOf('\r') < 0 || current.IndexOf('\n') >= 0) return candidate;
+        return candidate.Replace('\n', '\r');
     }
 
     /// <summary>
@@ -824,8 +982,8 @@ public sealed partial class MainWindow : Window
     /// unsaved-changes prompt on close is skipped (session teardown closes the app
     /// with dirty content and must not block on a dialog).
     /// </summary>
-    private static bool IsUiTestMode
-        => Environment.GetEnvironmentVariable("MARKUP_UITEST") == "1";
+    private static readonly bool s_isUiTestMode = Environment.GetEnvironmentVariable("MARKUP_UITEST") == "1";
+    private static bool IsUiTestMode => s_isUiTestMode;
 
     private void LoadSettings()
     {
@@ -906,15 +1064,44 @@ public sealed partial class MainWindow : Window
 
     #region Editor Events
 
+    private static bool IsKeyDown(Windows.System.VirtualKey key)
+        => Microsoft.UI.Input.InputKeyboardSource
+            .GetKeyStateForCurrentThread(key)
+            .HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down);
+
     private void EditorTextBox_PreviewKeyDown(object sender, KeyRoutedEventArgs e)
     {
-        AutomationFindPreviewKeyCount.Text = (int.TryParse(AutomationFindPreviewKeyCount.Text, out var n) ? n + 1 : 1).ToString();
+        if (IsUiTestMode)
+            AutomationFindPreviewKeyCount.Text = (int.TryParse(AutomationFindPreviewKeyCount.Text, out var n) ? n + 1 : 1).ToString();
+
+        var ctrlDown = IsKeyDown(Windows.System.VirtualKey.Control);
+        var shiftDown = IsKeyDown(Windows.System.VirtualKey.Shift);
+
+        // Tab / Shift+Tab: indent or outdent instead of moving keyboard focus.
+        if (e.Key == Windows.System.VirtualKey.Tab && !ctrlDown)
+        {
+            var text = EditorTextBox.Text;
+            var result = shiftDown
+                ? MarkdownEditing.OutdentLines(text, EditorTextBox.SelectionStart, EditorTextBox.SelectionLength)
+                : MarkdownEditing.IndentLines(text, EditorTextBox.SelectionStart, EditorTextBox.SelectionLength);
+            ApplyEditorKeyResult(result);
+            e.Handled = true;
+            return;
+        }
+
+        // Enter on a list / quote line continues the list (Shift+Enter keeps the plain newline).
+        if (e.Key == Windows.System.VirtualKey.Enter && !ctrlDown && !shiftDown && EditorTextBox.SelectionLength == 0)
+        {
+            var result = MarkdownEditing.ContinueListOnEnter(EditorTextBox.Text, EditorTextBox.SelectionStart);
+            if (result is not null)
+            {
+                ApplyEditorKeyResult(result);
+                e.Handled = true;
+            }
+            return;
+        }
 
         if (e.Key is not (Windows.System.VirtualKey.H or Windows.System.VirtualKey.F or Windows.System.VirtualKey.I)) return;
-
-        var ctrlDown = Microsoft.UI.Input.InputKeyboardSource
-            .GetKeyStateForCurrentThread(Windows.System.VirtualKey.Control)
-            .HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down);
         if (!ctrlDown) return;
 
         // Marking the tunneling event handled suppresses both the TextBox's default
@@ -932,6 +1119,29 @@ public sealed partial class MainWindow : Window
         else
         {
             MenuFind_Click(this, new RoutedEventArgs());
+        }
+    }
+
+    /// <summary>Applies a keyboard-driven edit (undoable) and schedules a preview refresh.</summary>
+    private void ApplyEditorKeyResult(FormattingResult result)
+    {
+        ApplyEditorDocumentUpdate(result.NewText, result.NewSelectionStart, result.NewSelectionLength, syncSource: "EditorToPreview");
+        _previewTimer.Stop();
+        _previewTimer.Start();
+    }
+
+    private async void EditorTextBox_Paste(object sender, TextControlPasteEventArgs e)
+    {
+        try
+        {
+            var content = Clipboard.GetContent();
+            if (!content.Contains(StandardDataFormats.Html)) return; // native plain-text paste
+            e.Handled = true;
+            await PasteRichTextIntoEditorAsync();
+        }
+        catch
+        {
+            // Fall back to whatever the TextBox does natively
         }
     }
 
@@ -955,6 +1165,17 @@ public sealed partial class MainWindow : Window
     private void PreviewWebView_GotFocus(object sender, RoutedEventArgs e)
     {
         _lastFocusedPanel = FocusedPanel.Preview;
+
+        // A debounced render may still be pending from editor typing. Once the preview has
+        // focus the timer tick refuses to overwrite it, so the preview would stay stale — and
+        // the next contentChanged from the preview would then push that stale content back
+        // over the editor, losing the last keystrokes. Flush it now, before any edit.
+        if (_previewTimer.IsEnabled)
+        {
+            _previewTimer.Stop();
+            _ = UpdatePreviewAsync(forceWhenPreviewFocused: true);
+        }
+
         RefreshAutomationState();
     }
 
@@ -980,6 +1201,8 @@ public sealed partial class MainWindow : Window
         SetAutomationSyncSource("EditorToPreview");
         UpdateTitle();
         UpdateStatusBar();
+        if (FindReplaceBar.Visibility == Visibility.Visible)
+            UpdateFindMatchCount();
 
         // Debounce preview updates
         _previewTimer.Stop();
@@ -1039,7 +1262,29 @@ public sealed partial class MainWindow : Window
         _lastMirroredPreviewSelectionStart = visibleStart;
         _lastMirroredPreviewSelectionLength = visibleLength;
         RefreshAutomationState();
-        RunPreviewScript($"if(typeof setMirroredSelection==='function') setMirroredSelection({visibleStart}, {visibleLength}, {reveal});");
+        if (IsUiTestMode)
+            ReportMirroredSelectionForAutomation($"if(typeof setMirroredSelection==='function') setMirroredSelection({visibleStart}, {visibleLength}, {reveal});");
+        else
+            RunPreviewScript($"if(typeof setMirroredSelection==='function') setMirroredSelection({visibleStart}, {visibleLength}, {reveal});");
+    }
+
+    /// <summary>
+    /// UI-test mode only: runs the mirroring script, then reads back the text the preview
+    /// actually highlighted so end-to-end parity can be asserted through the bridge.
+    /// </summary>
+    private async void ReportMirroredSelectionForAutomation(string script)
+    {
+        try
+        {
+            if (!_webViewReady || PreviewWebView.CoreWebView2 == null) return;
+            await PreviewWebView.CoreWebView2.ExecuteScriptAsync(script);
+            var json = await PreviewWebView.CoreWebView2.ExecuteScriptAsync("typeof getMirroredText==='function' ? getMirroredText() : ''");
+            AutomationPreviewMirroredText.Text = JsonSerializer.Deserialize<string>(json) ?? string.Empty;
+        }
+        catch
+        {
+            // Diagnostics only
+        }
     }
 
     private void PreviewTimer_Tick(object? sender, object e)
@@ -1126,7 +1371,7 @@ public sealed partial class MainWindow : Window
                 // Initial preview content should not trigger a full browser-style navigation during
                 // normal typing. The navigation path was causing WinAppDriver to lose its attached
                 // top-level window/session on the first debounced preview render.
-                _currentPreviewHtml = MarkdownParser.ToHtml(_document.Content, darkMode: true, editable: true, documentTitle: _document.DisplayName);
+                _currentPreviewHtml = MarkdownParser.ToHtml(_document.Content, darkMode: true, editable: true, documentTitle: _document.DisplayName, baseHref: PreviewBaseHref);
 
                 var tcs = new TaskCompletionSource<bool>();
                 void OnNavCompleted(WebView2 s, CoreWebView2NavigationCompletedEventArgs a)
@@ -1138,7 +1383,7 @@ public sealed partial class MainWindow : Window
                 await tcs.Task;
                 PreviewWebView.NavigationCompleted -= OnNavCompleted;
                 _previewInitialized = true;
-                _lastPushedPreviewFragment = MarkdownParser.ToHtmlFragment(_document.Content);
+                _lastPushedPreviewFragment = GetHtmlFragment();
 
                 // Re-apply zoom: a full navigation resets the page's CSS zoom.
                 if (_zoomPercent != 100)
@@ -1163,7 +1408,7 @@ public sealed partial class MainWindow : Window
                 // Skip the DOM replacement entirely when the rendered HTML is unchanged —
                 // rewriting identical innerHTML still destroys the selection and any
                 // active highlight ranges in the preview.
-                var bodyHtml = MarkdownParser.ToHtmlFragment(_document.Content);
+                var bodyHtml = GetHtmlFragment();
                 if (!string.Equals(bodyHtml, _lastPushedPreviewFragment, StringComparison.Ordinal))
                 {
                     var escapedHtml = JsonSerializer.Serialize(bodyHtml);
@@ -1243,18 +1488,12 @@ public sealed partial class MainWindow : Window
 
     private void RefreshAutomationState()
     {
-        // RefreshAutomationState runs on every caret move and keystroke; converting the
-        // whole document to HTML each time is the app's single largest CPU cost while
-        // typing. Cache the fragment keyed on the content string instead.
-        if (!ReferenceEquals(_automationHtmlSource, _document.Content)
-            && !string.Equals(_automationHtmlSource, _document.Content, StringComparison.Ordinal))
-        {
-            _automationHtmlSource = _document.Content;
-            _automationHtmlFragment = MarkdownParser.ToHtmlFragment(_document.Content);
-        }
+        // The bridge exists only for the WinAppDriver suite; skip the TextBlock churn in
+        // production. Runs on every caret move and keystroke when enabled.
+        if (!IsUiTestMode) return;
 
         AutomationDocumentContent.Text = TrimAutomationText(_document.Content);
-        AutomationPreviewHtml.Text = TrimAutomationText(_automationHtmlFragment);
+        AutomationPreviewHtml.Text = TrimAutomationText(GetHtmlFragment());
         AutomationFocusedPanel.Text = _lastFocusedPanel.ToString();
         AutomationViewMode.Text = _viewMode.ToString();
         AutomationEditorSelectionStart.Text = EditorTextBox.SelectionStart.ToString();
@@ -1265,6 +1504,7 @@ public sealed partial class MainWindow : Window
 
     private void SetAutomationSyncSource(string source)
     {
+        if (!IsUiTestMode) return;
         AutomationLastSyncSource.Text = source;
         RefreshAutomationState();
     }
@@ -1292,7 +1532,8 @@ public sealed partial class MainWindow : Window
         }
 
         _document.Reset();
-        ApplyEditorDocumentUpdate(string.Empty, 0, 0);
+        ApplyEditorDocumentUpdate(string.Empty, 0, 0, resetUndoHistory: true);
+        UpdateDocumentFolderMapping();
         _previewInitialized = false;
         UpdatePreview();
     }
@@ -1340,8 +1581,10 @@ public sealed partial class MainWindow : Window
             var content = await File.ReadAllTextAsync(path);
             _document.Reset();
             _document.FilePath = path;
-            ApplyEditorDocumentUpdate(content, 0, 0);
+            _document.LineEnding = MarkdownDocument.DetectLineEnding(content);
+            ApplyEditorDocumentUpdate(content, 0, 0, resetUndoHistory: true);
             _document.MarkSaved();
+            UpdateDocumentFolderMapping();
             _previewInitialized = false;
             _ = UpdatePreviewAsync(forceWhenPreviewFocused: true);
         }
@@ -1370,7 +1613,7 @@ public sealed partial class MainWindow : Window
 
         try
         {
-            await File.WriteAllTextAsync(_document.FilePath, _document.Content);
+            await File.WriteAllTextAsync(_document.FilePath, _document.GetContentForSave());
             _document.MarkSaved();
             UpdateTitle();
             return true;
@@ -1397,10 +1640,11 @@ public sealed partial class MainWindow : Window
 
         try
         {
-            await File.WriteAllTextAsync(file.Path, _document.Content);
+            await File.WriteAllTextAsync(file.Path, _document.GetContentForSave());
             _document.FilePath = file.Path;
             _document.MarkSaved();
             UpdateTitle();
+            UpdateDocumentFolderMapping();
             return true;
         }
         catch (Exception ex)
@@ -1458,7 +1702,7 @@ public sealed partial class MainWindow : Window
 
     private async void MenuExportPdf_Click(object sender, RoutedEventArgs e)
     {
-        if (!_printWebViewReady)
+        if (!await EnsurePrintWebViewAsync())
         {
             await ShowErrorAsync("PDF Export", "Print engine is not ready. Please wait and try again.");
             return;
@@ -1476,7 +1720,7 @@ public sealed partial class MainWindow : Window
 
         try
         {
-            _currentPrintHtml = MarkdownParser.ToHtmlForPrint(_document.Content, _document.DisplayName);
+            _currentPrintHtml = MarkdownParser.ToHtmlForPrint(_document.Content, _document.DisplayName, PreviewBaseHref);
 
             // Navigate via virtual host and wait for the page to fully load before exporting
             var navigationTcs = new TaskCompletionSource<bool>();
@@ -1571,12 +1815,8 @@ public sealed partial class MainWindow : Window
 
         if (EditorTextBox.SelectionLength > 0)
         {
-            var dp = new DataPackage();
-            dp.SetText(EditorTextBox.SelectedText);
-            Clipboard.SetContent(dp);
-            var start = EditorTextBox.SelectionStart;
-            EditorTextBox.Text = EditorTextBox.Text.Remove(start, EditorTextBox.SelectionLength);
-            EditorTextBox.SelectionStart = start;
+            // Native cut keeps the operation on the TextBox undo stack.
+            EditorTextBox.CutSelectionToClipboard();
         }
     }
 
@@ -1590,9 +1830,7 @@ public sealed partial class MainWindow : Window
 
         if (EditorTextBox.SelectionLength > 0)
         {
-            var dp = new DataPackage();
-            dp.SetText(EditorTextBox.SelectedText);
-            Clipboard.SetContent(dp);
+            EditorTextBox.CopySelectionToClipboard();
         }
     }
 
@@ -1681,18 +1919,12 @@ public sealed partial class MainWindow : Window
         if (string.IsNullOrEmpty(textToInsert))
             return;
 
-        var start = EditorTextBox.SelectionStart;
-        var fullText = EditorTextBox.Text;
-        var newText = fullText.Remove(start, EditorTextBox.SelectionLength).Insert(start, textToInsert);
-        _suppressTextChanged = true;
-        EditorTextBox.Text = newText;
-        EditorTextBox.SelectionStart = start + textToInsert.Length;
-        _suppressTextChanged = false;
-        _document.Content = EditorTextBox.Text;
-        UpdateTitle();
-        UpdateStatusBar();
-        _previewTimer.Stop();
-        _previewTimer.Start();
+        // Replacing the selection (rather than reassigning Text) keeps the paste undoable
+        // and lets the normal TextChanged path sync the document and preview.
+        EditorTextBox.SelectedText = textToInsert;
+        // The control leaves the inserted text selected (or collapses after it); either way
+        // the end of the current selection is the end of the pasted text.
+        EditorTextBox.Select(EditorTextBox.SelectionStart + EditorTextBox.SelectionLength, 0);
     }
 
     /// <summary>Escapes a string for safe embedding inside a JS single-quoted string literal.</summary>
@@ -1847,13 +2079,12 @@ public sealed partial class MainWindow : Window
             EditorTextBox.SelectedText.Equals(searchText, comparison))
         {
             var start = EditorTextBox.SelectionStart;
-            var text = EditorTextBox.Text;
-            var newText = text.Remove(start, EditorTextBox.SelectionLength).Insert(start, replaceText);
-            EditorTextBox.Text = newText;
-            EditorTextBox.SelectionStart = start + replaceText.Length;
+            EditorTextBox.SelectedText = replaceText; // undoable; TextChanged syncs the document
+            EditorTextBox.Select(start + replaceText.Length, 0);
         }
 
         FindInEditor(forward: true);
+        UpdateFindMatchCount();
     }
 
     private void ReplaceAll_Click(object sender, RoutedEventArgs e)
@@ -1870,8 +2101,12 @@ public sealed partial class MainWindow : Window
         var newText = text.Replace(searchText, replaceText, comparison);
         if (newText != text)
         {
-            EditorTextBox.Text = newText;
+            // One undoable edit spanning the first to last replacement.
+            ApplyEditorDocumentUpdate(newText, EditorTextBox.SelectionStart, 0, syncSource: "EditorToPreview");
+            _previewTimer.Stop();
+            _previewTimer.Start();
         }
+        UpdateFindMatchCount();
     }
 
     private void CloseFindBar_Click(object sender, RoutedEventArgs e)
@@ -2218,6 +2453,52 @@ public sealed partial class MainWindow : Window
     private void AutomationEditorSelectBoldFullButton_Click(object sender, RoutedEventArgs e)
         => EditorTextBox.Select(0, Math.Min(8, EditorTextBox.Text.Length));
 
+    /// <summary>
+    /// Selects an arbitrary editor range given as "start,length" in <c>AutomationParamInput</c>,
+    /// as if the user had dragged it, so tests can check the mirrored preview highlight.
+    /// </summary>
+    private void AutomationEditorSelectRangeButton_Click(object sender, RoutedEventArgs e)
+    {
+        var parts = AutomationParamInput.Text.Split(',');
+        AutomationParamInput.Text = string.Empty;
+        if (parts.Length != 2 || !int.TryParse(parts[0], out var start) || !int.TryParse(parts[1], out var length)) return;
+        _lastFocusedPanel = FocusedPanel.Editor;
+        EditorTextBox.Focus(FocusState.Programmatic);
+        EditorTextBox.Select(Math.Clamp(start, 0, EditorTextBox.Text.Length), Math.Max(0, length));
+        RefreshAutomationState();
+    }
+
+    /// <summary>
+    /// Selects the text in <c>AutomationParamInput</c> inside the rendered preview (native DOM
+    /// selection) and commits it to the host exactly like a user drag would.
+    /// </summary>
+    private async void AutomationPreviewSelectTextButton_Click(object sender, RoutedEventArgs e)
+    {
+        var text = AutomationParamInput.Text;
+        AutomationParamInput.Text = string.Empty;
+        if (!_webViewReady || string.IsNullOrEmpty(text)) return;
+        _lastFocusedPanel = FocusedPanel.Preview;
+        try
+        {
+            await PreviewWebView.CoreWebView2.ExecuteScriptAsync(
+                $"if(typeof selectPreviewText==='function') selectPreviewText({JsonSerializer.Serialize(text)});");
+        }
+        catch { }
+        RefreshAutomationState();
+    }
+
+    /// <summary>Clicks the first task checkbox in the preview, exercising the taskToggle round trip.</summary>
+    private async void AutomationPreviewToggleTaskButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (!_webViewReady) return;
+        try
+        {
+            await PreviewWebView.CoreWebView2.ExecuteScriptAsync(
+                "var cb=document.querySelector('.task-checkbox'); if(cb){ cb.click(); }");
+        }
+        catch { }
+    }
+
     private void AutomationEditorSelectBoldPartialButton_Click(object sender, RoutedEventArgs e)
         => EditorTextBox.Select(Math.Min(2, EditorTextBox.Text.Length), Math.Min(2, Math.Max(0, EditorTextBox.Text.Length - 2)));
 
@@ -2300,6 +2581,7 @@ public sealed partial class MainWindow : Window
             DefaultButton = ContentDialogButton.Primary,
             XamlRoot = Content.XamlRoot
         };
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(dialog, "FontSettingsDialog");
 
         var result = await dialog.ShowAsync();
         if (result == ContentDialogResult.Primary)
@@ -2374,6 +2656,7 @@ code block
             CloseButtonText = "Close",
             XamlRoot = Content.XamlRoot
         };
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(dialog, "MarkdownReferenceDialog");
 
         await dialog.ShowAsync();
     }
@@ -2462,6 +2745,7 @@ code block
             CloseButtonText = "OK",
             XamlRoot = Content.XamlRoot
         };
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(dialog, "AboutDialog");
 
         await dialog.ShowAsync();
     }
@@ -2545,6 +2829,7 @@ code block
             DefaultButton = ContentDialogButton.Primary,
             XamlRoot = Content.XamlRoot
         };
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(dialog, "UnsavedChangesDialog");
         return await dialog.ShowAsync();
     }
 

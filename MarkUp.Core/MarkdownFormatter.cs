@@ -336,17 +336,41 @@ public static class MarkdownFormatter
         return new FormattingResult(newText, selectionStart + prefix.Length, 0);
     }
 
+    private static readonly char[] LineBreakChars = ['\r', '\n'];
+
+    /// <summary>
+    /// Offset of the first character of the line containing <paramref name="position"/>.
+    /// Recognises <c>\n</c>, <c>\r\n</c> and bare <c>\r</c> (the WinUI TextBox reports typed
+    /// newlines as a lone <c>\r</c>).
+    /// </summary>
     internal static int GetLineStart(string text, int position)
     {
-        if (position <= 0) return 0;
-        var idx = text.LastIndexOf('\n', Math.Min(position - 1, text.Length - 1));
+        if (position <= 0 || text.Length == 0) return 0;
+        var idx = text.LastIndexOfAny(LineBreakChars, Math.Min(position - 1, text.Length - 1));
         return idx < 0 ? 0 : idx + 1;
     }
 
+    /// <summary>
+    /// Offset of the line-break character that ends the line containing
+    /// <paramref name="position"/>, or the text length when it is the last line.
+    /// </summary>
     internal static int GetLineEnd(string text, int position)
     {
-        var idx = text.IndexOf('\n', position);
+        if (position >= text.Length) return text.Length;
+        var idx = text.IndexOfAny(LineBreakChars, position);
         return idx < 0 ? text.Length : idx;
+    }
+
+    /// <summary>
+    /// Offset of the first character after the line break at <paramref name="lineEnd"/>,
+    /// treating <c>\r\n</c> as a single break.
+    /// </summary>
+    internal static int GetNextLineStart(string text, int lineEnd)
+    {
+        if (lineEnd >= text.Length) return text.Length;
+        if (text[lineEnd] == '\r' && lineEnd + 1 < text.Length && text[lineEnd + 1] == '\n')
+            return lineEnd + 2;
+        return lineEnd + 1;
     }
 
     /// <summary>

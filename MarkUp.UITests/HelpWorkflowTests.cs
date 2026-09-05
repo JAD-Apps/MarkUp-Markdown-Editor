@@ -33,9 +33,10 @@ public sealed class HelpWorkflowTests : AppSession
     public void MarkdownReference_ByMenu_OpensDialog()
     {
         ClickMenu("MenuBarHelp", "MenuMarkdownRef");
-        var dialog = WaitForDesktopByAnyName(TimeSpan.FromSeconds(2), "Markdown Quick Reference", "Close")
-            ?? TryFindInAppByName("Markdown Quick Reference")
-            ?? TryFindInAppByName("Close");
+        // The dialog carries an AutomationId so the lookup resolves directly instead of a
+        // by-name desktop crawl, which can wander into the WebView2 UIA subtree for minutes.
+        var dialog = TryFindById("MarkdownReferenceDialog")
+            ?? WaitForDesktopByAnyName(TimeSpan.FromSeconds(2), "Markdown Quick Reference", "Close");
 
         Assert.IsNotNull(dialog, "Expected Markdown Quick Reference dialog to appear.");
         DismissTransientWindows();
@@ -50,10 +51,8 @@ public sealed class HelpWorkflowTests : AppSession
     public void About_ByMenu_OpensDialog()
     {
         ClickMenu("MenuBarHelp", "MenuAbout");
-        var dialog = WaitForDesktopByAnyName(TimeSpan.FromSeconds(2), "About MarkUp", "MarkUp Markdown Editor", "Close")
-            ?? TryFindInAppByName("About MarkUp")
-            ?? TryFindInAppByName("MarkUp Markdown Editor")
-            ?? TryFindInAppByName("Close");
+        var dialog = TryFindById("AboutDialog")
+            ?? WaitForDesktopByAnyName(TimeSpan.FromSeconds(2), "About MarkUp", "MarkUp Markdown Editor", "Close");
 
         Assert.IsNotNull(dialog, "Expected About MarkUp dialog to appear.");
         DismissTransientWindows();

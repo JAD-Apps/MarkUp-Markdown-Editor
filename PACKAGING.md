@@ -29,7 +29,7 @@ This guide describes the steps to produce a Microsoft Store–ready MSIX package
 2. Right-click the `MarkUp Markdown Editor` project → **Publish** →
    **Create App Packages…**
 3. Choose **Microsoft Store** → select or create your Partner Center app association.
-4. Set the **Version** to match `<Version>` in the `.csproj` (e.g. `1.7.0.0`).
+4. Set the **Version** to match `<Version>` in the `.csproj` (e.g. `1.8.0.0`).
    The version in `Package.appxmanifest` must also match — both are updated automatically
    by the release process.
 5. Select all three architectures (x86, x64, ARM64).
@@ -41,13 +41,28 @@ This guide describes the steps to produce a Microsoft Store–ready MSIX package
 ```powershell
 # From the repo root
 dotnet build "MarkUp Markdown Editor\MarkUp Markdown Editor.csproj" `
-	-c Release `
+	-c Release -p:Platform=x64 `
 	-p:GenerateAppxPackageOnBuild=true `
+	-p:UapAppxPackageBuildMode=StoreUpload `
 	-p:AppxBundle=Always `
-	-p:AppxBundlePlatforms="x86|x64|ARM64"
+	-p:AppxBundlePlatforms="x86|x64|ARM64" `
+	"-p:PdbCmfx64ExeFullPath=$VC\x64\mspdbcmf.exe" `
+	"-p:PdbCmfx86ExeFullPath=$VC\x86\mspdbcmf.exe"
+# where $VC points at the MSVC host tools, e.g.
+# $VC = "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\bin\Hostx64"
 ```
 
-The output lands in `AppPackages\StoreUpload\`.
+The two `PdbCmf*` properties are only needed outside a Visual Studio developer shell: the
+symbol-package targets look for `mspdbcmf.exe` via `VCToolsInstallDir`, which the plain
+`dotnet` CLI does not set, and without it the build fails with MSB4044 / MSB6011 after the
+bundle is written (the `.msixupload` would then lack the `.appxsym` files).
+
+`-p:Platform=x64` is required (without it the packaging targets fail with "cannot be
+ProcessorArchitecture neutral"); the bundle still contains all three architectures.
+`UapAppxPackageBuildMode=StoreUpload` produces the Partner Center artefact
+`AppPackages\MarkUp Markdown Editor_<version>_x86_x64_ARM64_bundle.msixupload` (bundle + symbols in
+one file). Without it you get a dev-signed sideload bundle under
+`AppPackages\MarkUp Markdown Editor_<version>_Test\`, which the Store will not accept.
 
 ---
 
@@ -55,9 +70,8 @@ The output lands in `AppPackages\StoreUpload\`.
 
 1. Sign in to [Partner Center](https://partner.microsoft.com/dashboard).
 2. Select **MarkUp Markdown Editor** → **Start a new submission** (or update an existing draft).
-3. In **Packages**, upload:
-   - `MarkUp Markdown Editor_<version>.msixbundle`
-   - The three `.appxsym` symbol files (one per arch)
+3. In **Packages**, upload `MarkUp Markdown Editor_<version>_x86_x64_ARM64_bundle.msixupload`
+   (it already contains the bundle and the three per-arch `.appxsym` symbol files).
 4. Complete the **Store listing** and **Pricing/Availability** sections (no changes needed for
    a patch/minor release — the existing text carries over).
 5. Click **Submit to the Store**.
@@ -66,7 +80,7 @@ The output lands in `AppPackages\StoreUpload\`.
 
 ## Release Checklist
 
-- [ ] All unit tests pass (`dotnet test` → 400/400).
+- [ ] All unit tests pass (`dotnet test MarkUp.Tests/MarkUp.Tests.csproj` → 487/487).
 - [ ] `<Version>` in `MarkUp Markdown Editor.csproj` updated.
 - [ ] `Package.appxmanifest` `Version` attribute updated (format `X.Y.Z.0`).
 - [ ] `CHANGELOG.md` entry added with the correct date (`git log -1 --format=%ad --date=short`).

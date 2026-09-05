@@ -40,6 +40,44 @@ public sealed class MarkdownDocument
     public bool IsDirty => _isDirty;
 
     /// <summary>
+    /// Line-ending sequence used when the document is written to disk. Detected from the
+    /// file on load; new documents default to the Windows convention.
+    /// </summary>
+    public string LineEnding { get; set; } = "\r\n";
+
+    /// <summary>
+    /// Detects the dominant line ending of <paramref name="text"/>: <c>\r\n</c> when present,
+    /// otherwise <c>\n</c>, otherwise <c>\r</c>. Falls back to the current value when the
+    /// text has no line breaks at all.
+    /// </summary>
+    public static string DetectLineEnding(string text, string fallback = "\r\n")
+    {
+        if (string.IsNullOrEmpty(text)) return fallback;
+        if (text.Contains("\r\n", StringComparison.Ordinal)) return "\r\n";
+        if (text.Contains('\n')) return "\n";
+        if (text.Contains('\r')) return "\r";
+        return fallback;
+    }
+
+    /// <summary>
+    /// Returns the content with every line break normalised to <see cref="LineEnding"/>.
+    /// The editor control stores typed newlines as a bare <c>\r</c>, so writing
+    /// <see cref="Content"/> verbatim would produce files with mixed or CR-only breaks.
+    /// </summary>
+    public string GetContentForSave()
+    {
+        return NormalizeLineEndings(_content, LineEnding);
+    }
+
+    /// <summary>Normalises all line breaks in <paramref name="text"/> to <paramref name="lineEnding"/>.</summary>
+    public static string NormalizeLineEndings(string text, string lineEnding)
+    {
+        if (string.IsNullOrEmpty(text)) return string.Empty;
+        var unified = text.Replace("\r\n", "\n").Replace('\r', '\n');
+        return lineEnding == "\n" ? unified : unified.Replace("\n", lineEnding);
+    }
+
+    /// <summary>
     /// Gets the display name (file name or "Untitled").
     /// </summary>
     public string DisplayName =>
@@ -61,6 +99,7 @@ public sealed class MarkdownDocument
         _content = string.Empty;
         _filePath = string.Empty;
         _isDirty = false;
+        LineEnding = "\r\n";
     }
 
     /// <summary>
